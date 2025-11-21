@@ -14,7 +14,8 @@
 
 from typing import Any, Dict, Iterable, Optional
 
-import lightning as L
+import warnings
+import pytorch_lightning as pl
 import torch
 
 from gluonts.core.component import validated
@@ -27,11 +28,7 @@ from gluonts.time_feature import (
     get_lags_for_frequency,
     time_features_from_frequency_str,
 )
-from gluonts.torch.distributions import (
-    NegativeBinomialOutput,
-    StudentTOutput,
-    ImplicitQuantileNetworkOutput,
-)
+from gluonts.torch.distributions import StudentTOutput, NegativeBinomialOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
 from gluonts.transform import (
@@ -47,6 +44,10 @@ from gluonts.transform import (
     ValidationSplitSampler,
 )
 
+from gluon_utils.gluon_ts_distributions.implicit_quantile_network import (
+    ImplicitQuantileNetworkOutput,
+)
+from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from lag_llama.gluon.lightning_module import LagLlamaLightningModule
 
 PREDICTION_INPUT_NAMES = [
@@ -65,7 +66,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
 
     This class is uses the model defined in ``ConvTSMixerModel``,
     and wraps it into a ``ConvTSMixerLightningModule`` for training
-    purposes: training is performed using PyTorch Lightning's ``L.Trainer``
+    purposes: training is performed using PyTorch Lightning's ``pl.Trainer``
     class.
 
     Parameters
@@ -82,6 +83,9 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
     distr_output
         Distribution to use to evaluate observations and sample predictions
         (default: StudentTOutput()).
+    loss
+        Loss to be optimized during training
+        (default: ``NegativeLogLikelihood()``).
     batch_norm
         Whether to apply batch normalization.
     batch_size
@@ -90,7 +94,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         Number of batches to be processed in each training epoch
             (default: 50).
     trainer_kwargs
-        Additional arguments to provide to ``L.Trainer`` for construction.
+        Additional arguments to provide to ``pl.Trainer`` for construction.
     train_sampler
         Controls the sampling of windows during training.
     validation_sampler
@@ -140,6 +144,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         window_warp_scales: list = [0.5, 2.0],
         # Continuning model arguments
         distr_output: str = "studentT",
+        loss: DistributionLoss = NegativeLogLikelihood(),
         num_parallel_samples: int = 100,
         batch_size: int = 32,
         num_batches_per_epoch: int = 50,
@@ -147,8 +152,10 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         time_feat: bool = False,
+        dynamic_feat_size: int = 0,
+        use_covariates: bool = False,
         dropout: float = 0.0,
-        lags_seq: list = ["QE", "ME", "W", "D", "h", "min", "s"],
+        lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
         data_id_to_name_map: dict = {},
         use_cosine_annealing_lr: bool = False,
         cosine_annealing_lr_args: dict = {},
@@ -156,9 +163,8 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         ckpt_path: Optional[str] = None,
         nonnegative_pred_samples: bool = False,
         use_single_pass_sampling: bool = False,
-        device: torch.device = torch.device("cuda")
-        if torch.cuda.is_available()
-        else torch.device("cpu"),
+        device: torch.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
+        covariate_field_sizes: Optional[Dict[str, int]] = None,
     ) -> None:
         default_trainer_kwargs = {"max_epochs": 100}
         if trainer_kwargs is not None:
@@ -173,15 +179,47 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
 
         lag_indices = []
         for freq in lags_seq:
-            lag_indices.extend(
-                get_lags_for_frequency(freq_str=freq, num_default_lags=1)
-            )
+            try:
+                lag_indices.extend(
+                    get_lags_for_frequency(freq_str=freq, num_default_lags=1)
+                )
+            except Exception as e:
+                warnings.warn(
+                    f"Invalid frequency '{freq}' in lags_seq, skipping. Error: {str(e)}"
+                )
+                continue
 
         if len(lag_indices):
-            self.lags_seq = sorted(set(lag_indices))
-            self.lags_seq = [lag_index - 1 for lag_index in self.lags_seq]
+            lag_indices = sorted(set(lag_indices))
+            # Limit max lag to avoid requiring too much history
+            # For daily data, reasonable max lag is around 365 days (1 year)
+            # For other frequencies, limit to context_length * 3 to allow some seasonality
+            # But cap at 365 to avoid requiring too much history
+            ctx_len = context_length or 64
+            max_lag_limit = min(365, ctx_len * 3)
+            
+            original_max = max(lag_indices)
+            lag_indices = [lag for lag in lag_indices if lag <= max_lag_limit]
+            
+            if len(lag_indices) == 0:
+                # If all lags were filtered out, use a default small lag
+                warnings.warn(
+                    f"All lag indices exceeded limit {max_lag_limit}. Using default lag of 1."
+                )
+                lag_indices = [1]
+            elif original_max > max_lag_limit:
+                warnings.warn(
+                    f"Some lag indices exceeded limit {max_lag_limit} (max was {original_max}). "
+                    f"Filtered lags to max {max_lag_limit}."
+                )
+            
+            # Store original lag indices for past_length calculation
+            self.max_lag_original = max(lag_indices)
+            # Convert to 0-based indexing for model use
+            self.lags_seq = [lag_index - 1 for lag_index in lag_indices]
         else:
             self.lags_seq = []
+            self.max_lag_original = 0
 
         self.n_head = n_head
         self.n_layer = n_layer
@@ -198,6 +236,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             distr_output = ImplicitQuantileNetworkOutput()
         self.distr_output = distr_output
         self.num_parallel_samples = num_parallel_samples
+        self.loss = loss
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
         self.nonnegative_pred_samples = nonnegative_pred_samples
@@ -236,10 +275,35 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         self.window_warp_scales = window_warp_scales
         self.track_loss_per_series = track_loss_per_series
 
+        # -------- 协变量开关检查 --------
+        # 当用户要求启用协变量但数据集中没有动态特征时，给出警告并禁用。
+        if use_covariates and dynamic_feat_size == 0:
+            warnings.warn(
+                "use_covariates is True but dynamic_feat_size is 0. Disabling covariates."
+            )
         self.time_feat = time_feat
+        self.dynamic_feat_size = dynamic_feat_size if dynamic_feat_size is not None else 0
+        self.use_covariates = use_covariates and self.dynamic_feat_size > 0
         self.dropout = dropout
         self.data_id_to_name_map = data_id_to_name_map
         self.ckpt_path = ckpt_path
+        if covariate_field_sizes is None:
+            covariate_field_sizes = {
+                "dynamic_real": self.dynamic_feat_size if self.use_covariates else 0,
+                "dynamic_cat": 0,
+                "static_real": 0,
+                "static_cat": 0,
+            }
+        self.covariate_field_sizes = {
+            "dynamic_real": covariate_field_sizes.get("dynamic_real", 0),
+            "dynamic_cat": covariate_field_sizes.get("dynamic_cat", 0),
+            "static_real": covariate_field_sizes.get("static_real", 0),
+            "static_cat": covariate_field_sizes.get("static_cat", 0),
+        }
+        self.has_dynamic_real = self.covariate_field_sizes["dynamic_real"] > 0
+        self.has_dynamic_cat = self.covariate_field_sizes["dynamic_cat"] > 0
+        self.has_static_real = self.covariate_field_sizes["static_real"] > 0
+        self.has_static_cat = self.covariate_field_sizes["static_cat"] > 0
 
         self.use_cosine_annealing_lr = use_cosine_annealing_lr
         self.cosine_annealing_lr_args = cosine_annealing_lr_args
@@ -263,7 +327,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                         start_field=FieldName.START,
                         target_field=FieldName.TARGET,
                         output_field=FieldName.FEAT_TIME,
-                        time_features=time_features_from_frequency_str("s"),
+                        time_features=time_features_from_frequency_str("S"),
                         pred_length=self.prediction_length,
                     ),
                     AddObservedValuesIndicator(
@@ -284,27 +348,56 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 ]
             )
 
-    def create_lightning_module(self, use_kv_cache: bool = False) -> L.LightningModule:
-        model_kwargs = {
-            "input_size": self.input_size,
-            "context_length": self.context_length,
-            "max_context_length": self.max_context_length,
-            "lags_seq": self.lags_seq,
-            "n_layer": self.n_layer,
-            "n_embd_per_head": self.n_embd_per_head,
-            "n_head": self.n_head,
-            "scaling": self.scaling,
-            "distr_output": self.distr_output,
-            "num_parallel_samples": self.num_parallel_samples,
-            "rope_scaling": self.rope_scaling,
-            "time_feat": self.time_feat,
-            "dropout": self.dropout,
-        }
+    def create_lightning_module(self, use_kv_cache: bool = False) -> pl.LightningModule:
+        if self.ckpt_path is not None:
+            # Load checkpoint to get the original model_kwargs
+            ckpt = torch.load(self.ckpt_path, map_location=self.device, weights_only=False)
+            ckpt_model_kwargs = ckpt["hyper_parameters"]["model_kwargs"].copy()
+            
+            # Use checkpoint's model_kwargs to ensure feature_size matches
+            # But allow overriding context_length, prediction_length, and rope_scaling
+            model_kwargs = {
+                "input_size": ckpt_model_kwargs["input_size"],
+                "context_length": self.context_length,  # Allow override
+                "max_context_length": ckpt_model_kwargs.get("max_context_length", self.max_context_length),
+                "lags_seq": ckpt_model_kwargs["lags_seq"],  # Critical: must match checkpoint
+                "n_layer": ckpt_model_kwargs["n_layer"],
+                "n_embd_per_head": ckpt_model_kwargs["n_embd_per_head"],
+                "n_head": ckpt_model_kwargs["n_head"],
+                "scaling": ckpt_model_kwargs["scaling"],
+                "distr_output": self.distr_output,  # Can use current if compatible
+                "num_parallel_samples": self.num_parallel_samples,
+                "rope_scaling": self.rope_scaling,  # Allow override
+                "time_feat": ckpt_model_kwargs.get("time_feat", self.time_feat),  # Must match checkpoint
+                "dynamic_feat_size": ckpt_model_kwargs.get("dynamic_feat_size", 0),  # Must match checkpoint
+                "use_covariates": ckpt_model_kwargs.get("use_covariates", False),  # Must match checkpoint
+                "dropout": ckpt_model_kwargs.get("dropout", self.dropout),
+            }
+        else:
+            model_kwargs = {
+                "input_size": self.input_size,
+                "context_length": self.context_length,
+                "max_context_length": self.max_context_length,
+                "lags_seq": self.lags_seq,
+                "n_layer": self.n_layer,
+                "n_embd_per_head": self.n_embd_per_head,
+                "n_head": self.n_head,
+                "scaling": self.scaling,
+                "distr_output": self.distr_output,
+                "num_parallel_samples": self.num_parallel_samples,
+                "rope_scaling": self.rope_scaling,
+                "time_feat": self.time_feat,
+                "dynamic_feat_size": self.dynamic_feat_size,
+                "use_covariates": self.use_covariates,
+                "dropout": self.dropout,
+            }
+        
         if self.ckpt_path is not None:
             return LagLlamaLightningModule.load_from_checkpoint(
                 checkpoint_path=self.ckpt_path,
                 map_location=self.device,
                 strict=False,
+                loss=self.loss,
                 lr=self.lr,
                 weight_decay=self.weight_decay,
                 context_length=self.context_length,
@@ -339,9 +432,11 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 cosine_annealing_lr_args=self.cosine_annealing_lr_args,
                 track_loss_per_series=self.track_loss_per_series,
                 nonnegative_pred_samples=self.nonnegative_pred_samples,
+                covariate_field_sizes=self.covariate_field_sizes,
             )
         else:
             return LagLlamaLightningModule(
+                loss=self.loss,
                 lr=self.lr,
                 weight_decay=self.weight_decay,
                 context_length=self.context_length,
@@ -376,9 +471,38 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 cosine_annealing_lr_args=self.cosine_annealing_lr_args,
                 track_loss_per_series=self.track_loss_per_series,
                 nonnegative_pred_samples=self.nonnegative_pred_samples,
+                covariate_field_sizes=self.covariate_field_sizes,
             )
 
+    def _get_time_series_fields(self):
+        # 生成传递给 InstanceSplitter 的字段列表：基础的观测值、时间特征以及动态协变量
+        fields = [FieldName.OBSERVED_VALUES]
+        if self.time_feat:
+            fields.append(FieldName.FEAT_TIME)
+        if self.use_covariates and self.has_dynamic_real:
+            fields.append(FieldName.FEAT_DYNAMIC_REAL)
+        if self.use_covariates and self.has_dynamic_cat:
+            fields.append(FieldName.FEAT_DYNAMIC_CAT)
+        return fields
+
+    def _additional_field_names(self):
+        # dataloader 输出时附加的张量名，与上面的字段保持一一对应
+        extra_fields = []
+        if self.time_feat:
+            extra_fields += ["past_time_feat", "future_time_feat"]
+        if self.use_covariates:
+            if self.has_dynamic_real:
+                extra_fields += ["past_feat_dynamic_real", "future_feat_dynamic_real"]
+            if self.has_dynamic_cat:
+                extra_fields += ["past_feat_dynamic_cat", "future_feat_dynamic_cat"]
+            if self.has_static_real:
+                extra_fields += ["feat_static_real"]
+            if self.has_static_cat:
+                extra_fields += ["feat_static_cat"]
+        return extra_fields
+
     def _create_instance_splitter(self, module: LagLlamaLightningModule, mode: str):
+        # 根据训练/验证/测试模式创建窗口切分器，决定可用的时间序列字段
         assert mode in ["training", "validation", "test"]
 
         instance_sampler = {
@@ -386,18 +510,15 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             "validation": self.validation_sampler,
             "test": TestSplitSampler(),
         }[mode]
-
         return InstanceSplitter(
             target_field=FieldName.TARGET,
             is_pad_field=FieldName.IS_PAD,
             start_field=FieldName.START,
             forecast_start_field=FieldName.FORECAST_START,
             instance_sampler=instance_sampler,
-            past_length=self.context_length + max(self.lags_seq),
+            past_length=self.context_length + (self.max_lag_original if hasattr(self, 'max_lag_original') else (max(self.lags_seq) + 1 if len(self.lags_seq) > 0 else 0)),
             future_length=self.prediction_length,
-            time_series_fields=[FieldName.FEAT_TIME, FieldName.OBSERVED_VALUES]
-            if self.time_feat
-            else [FieldName.OBSERVED_VALUES],
+            time_series_fields=self._get_time_series_fields(),
             dummy_value=self.distr_output.value_in_support,
         )
 
@@ -412,26 +533,16 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
-        if self.time_feat:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                shuffle_buffer_length=shuffle_buffer_length,
-                field_names=TRAINING_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                output_type=torch.tensor,
-                num_batches_per_epoch=self.num_batches_per_epoch,
-            )
-
-        else:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                shuffle_buffer_length=shuffle_buffer_length,
-                field_names=TRAINING_INPUT_NAMES,
-                output_type=torch.tensor,
-                num_batches_per_epoch=self.num_batches_per_epoch,
-            )
+        field_names = TRAINING_INPUT_NAMES + self._additional_field_names()
+        # as_stacked_batches 会把所需字段堆叠成张量，这里附带时间特征与协变量
+        return as_stacked_batches(
+            instances,
+            batch_size=self.batch_size,
+            shuffle_buffer_length=shuffle_buffer_length,
+            field_names=field_names,
+            output_type=torch.tensor,
+            num_batches_per_epoch=self.num_batches_per_epoch,
+        )
 
     def create_validation_data_loader(
         self,
@@ -442,21 +553,14 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
-        if self.time_feat:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                field_names=TRAINING_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                output_type=torch.tensor,
-            )
-        else:
-            return as_stacked_batches(
-                instances,
-                batch_size=self.batch_size,
-                field_names=TRAINING_INPUT_NAMES,
-                output_type=torch.tensor,
-            )
+        field_names = TRAINING_INPUT_NAMES + self._additional_field_names()
+        # 验证阶段同样保持额外字段，方便 Lightning 计算 loss
+        return as_stacked_batches(
+            instances,
+            batch_size=self.batch_size,
+            field_names=field_names,
+            output_type=torch.tensor,
+        )
 
     def create_predictor(
         self,
@@ -464,22 +568,24 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         module,
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
+        # 推理阶段的输入名必须和前面 dataloader 输出一致，否则 Predictor 无法取值
+        input_names = list(PREDICTION_INPUT_NAMES)
         if self.time_feat:
-            return PyTorchPredictor(
-                input_transform=transformation + prediction_splitter,
-                input_names=PREDICTION_INPUT_NAMES
-                + ["past_time_feat", "future_time_feat"],
-                prediction_net=module,
-                batch_size=self.batch_size,
-                prediction_length=self.prediction_length,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
-        else:
-            return PyTorchPredictor(
-                input_transform=transformation + prediction_splitter,
-                input_names=PREDICTION_INPUT_NAMES,
-                prediction_net=module,
-                batch_size=self.batch_size,
-                prediction_length=self.prediction_length,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
+            input_names += ["past_time_feat", "future_time_feat"]
+        if self.use_covariates:
+            if self.has_dynamic_real:
+                input_names += ["past_feat_dynamic_real", "future_feat_dynamic_real"]
+            if self.has_dynamic_cat:
+                input_names += ["past_feat_dynamic_cat", "future_feat_dynamic_cat"]
+            if self.has_static_real:
+                input_names += ["feat_static_real"]
+            if self.has_static_cat:
+                input_names += ["feat_static_cat"]
+        return PyTorchPredictor(
+            input_transform=transformation + prediction_splitter,
+            input_names=input_names,
+            prediction_net=module,
+            batch_size=self.batch_size,
+            prediction_length=self.prediction_length,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )

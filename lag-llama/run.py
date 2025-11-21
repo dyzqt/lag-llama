@@ -14,6 +14,7 @@
 
 import warnings
 
+# ===== 运行脚本入口：忽略部分外部库的告警，保证日志干净 =====
 warnings.simplefilter(action="ignore", category=FutureWarning)
 warnings.simplefilter(action="ignore", category=UserWarning)
 
@@ -22,13 +23,17 @@ import gc
 import json
 import os
 from hashlib import sha1
+from pathlib import Path
 
 import lightning
+import lightning.pytorch.trainer
 import torch
+from gluonts.torch.distributions.studentT import StudentTOutput
 import wandb
 from gluonts.evaluation import Evaluator, make_evaluation_predictions
 from gluonts.evaluation._base import aggregate_valid
 from gluonts.transform import ExpectedNumInstanceSampler
+from gluonts.torch.modules.loss import NegativeLogLikelihood
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
@@ -42,15 +47,19 @@ from data.data_utils import (
     SingleInstanceSampler,
     create_test_dataset,
     create_train_and_val_datasets_with_dates,
+    get_dynamic_feat_size,
+    get_covariate_feature_sizes,
 )
 
 from data.dataset_list import ALL_DATASETS
 from utils.utils import plot_forecasts, set_seed
 
-
 from lag_llama.gluon.estimator import LagLlamaEstimator
 
+torch.serialization.add_safe_globals([StudentTOutput, NegativeLogLikelihood])
 
+
+# ===== train 函数：负责整个单/多数据集训练、评估、可视化的主流程 =====
 def train(args):
     # Set seed
     set_seed(args.seed)
@@ -76,10 +85,12 @@ def train(args):
     if args.ckpt_path:
         ckpt_path = args.ckpt_path
     elif args.get_ckpt_path_from_experiment_name:
-        fulldir_experiments_for_ckpt_path = os.path.join(args.results_dir, args.get_ckpt_path_from_experiment_name, str(args.seed))
+        fulldir_experiments_for_ckpt_path = os.path.join(args.results_dir, args.get_ckpt_path_from_experiment_name,
+                                                         str(args.seed))
         full_experiment_name_original = args.get_ckpt_path_from_experiment_name + "-seed-" + str(args.seed)
         experiment_id_original = sha1(full_experiment_name_original.encode("utf-8")).hexdigest()[:8]
-        checkpoint_dir_wandb = os.path.join(fulldir_experiments_for_ckpt_path, "lag-llama", experiment_id_original, "checkpoints")
+        checkpoint_dir_wandb = os.path.join(fulldir_experiments_for_ckpt_path, "lag-llama", experiment_id_original,
+                                            "checkpoints")
         file = os.listdir(checkpoint_dir_wandb)[-1]
         if file: ckpt_path = os.path.join(checkpoint_dir_wandb, file)
         if not ckpt_path: raise Exception("ckpt_path not found from experiment name")
@@ -88,9 +99,15 @@ def train(args):
         print("Moving", ckpt_path, "to", new_ckpt_path)
         ckpt_loaded = torch.load(ckpt_path)
         del ckpt_loaded['callbacks']["EarlyStopping{'monitor': 'val_loss', 'mode': 'min'}"]
-        ckpt_loaded['callbacks']["ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"]["best_model_path"] = new_ckpt_path
-        ckpt_loaded['callbacks']["ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"]["dirpath"] = checkpoint_dir
-        del ckpt_loaded['callbacks']["ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"]["last_model_path"]
+        ckpt_loaded['callbacks'][
+            "ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"][
+            "best_model_path"] = new_ckpt_path
+        ckpt_loaded['callbacks'][
+            "ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"][
+            "dirpath"] = checkpoint_dir
+        del ckpt_loaded['callbacks'][
+            "ModelCheckpoint{'monitor': None, 'mode': 'min', 'every_n_train_steps': 0, 'every_n_epochs': 1, 'train_time_interval': None}"][
+            "last_model_path"]
         torch.save(ckpt_loaded, checkpoint_dir + "/pretrained_ckpt.ckpt")
         ckpt_path = checkpoint_dir + "/pretrained_ckpt.ckpt"
     else:
@@ -102,7 +119,8 @@ def train(args):
             if args.evaluate_only:
                 full_experiment_name_original = experiment_name + "-seed-" + str(args.seed)
                 experiment_id_original = sha1(full_experiment_name_original.encode("utf-8")).hexdigest()[:8]
-                checkpoint_dir_wandb = os.path.join(fulldir_experiments, "lag-llama", experiment_id_original, "checkpoints")
+                checkpoint_dir_wandb = os.path.join(fulldir_experiments, "lag-llama", experiment_id_original,
+                                                    "checkpoints")
                 file = os.listdir(checkpoint_dir_wandb)[-1]
                 if file: ckpt_path = os.path.join(checkpoint_dir_wandb, file)
             elif args.evaluate_only:
@@ -119,45 +137,32 @@ def train(args):
     # W&B logging
     # NOTE: Caution when using `full_experiment_name` after this
     if args.eval_prefix and (args.evaluate_only): experiment_name = args.eval_prefix + "_" + experiment_name
+    # --- 构造 WandB 运行信息，并初始化 logger ---
     full_experiment_name = experiment_name + "-seed-" + str(args.seed)
     experiment_id = sha1(full_experiment_name.encode("utf-8")).hexdigest()[:8]
     logger = WandbLogger(name=full_experiment_name, \
-                        save_dir=fulldir_experiments, group=experiment_name, \
-                        tags=args.wandb_tags, entity=args.wandb_entity, \
-                        project=args.wandb_project, allow_val_change=True, \
-                        config=vars(args), id=experiment_id, \
-                        mode=args.wandb_mode, settings=wandb.Settings(code_dir="."))
-    
-    # Callbacks
+                         save_dir=fulldir_experiments, group=experiment_name, \
+                         tags=args.wandb_tags, entity=args.wandb_entity, \
+                         project=args.wandb_project, allow_val_change=True, \
+                         config=vars(args), id=experiment_id, \
+                         mode=args.wandb_mode, settings=wandb.Settings(code_dir="."))
+
+    # --- 训练过程中的回调：SWA、早停、Checkpoint、学习率监控等 ---
     swa_callbacks = StochasticWeightAveraging(
         swa_lrs=args.swa_lrs,
         swa_epoch_start=args.swa_epoch_start,
         annealing_epochs=args.annealing_epochs,
         annealing_strategy=args.annealing_strategy,
     )
-    early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        min_delta=0.00,
-        patience=int(args.early_stopping_patience),
-        verbose=True,
-        mode="min",
-    )
-    model_checkpointing = ModelCheckpoint(
-        dirpath=checkpoint_dir,
-        save_last=True,
-        save_top_k=1,
-        filename="best-{epoch}-{val_loss:.2f}",
-    )
+    # Early stopping and model checkpointing - we'll add them after creating datasets
+    # to check if validation data exists
     lr_monitor = LearningRateMonitor(logging_interval='step')
-    callbacks = [early_stop_callback,
-                lr_monitor,
-                model_checkpointing
-                ]
+    callbacks = [lr_monitor]  # Always add LR monitor
     if args.swa:
         print("Using SWA")
         callbacks.append(swa_callbacks)
 
-    # Create train and test datasets
+    # --- 构造训练/测试数据集（多数据集合并或单数据集） ---
     if not args.single_dataset:
         train_dataset_names = args.all_datasets
         for test_dataset in args.test_datasets:
@@ -188,6 +193,26 @@ def train(args):
         )
         args.prediction_length = prediction_length
 
+    # -------- 单数据集协变量设置 --------
+    # 仅在单数据集场景下允许读取 metadata 中的动态特征维度，便于后续模型拼接协变量。
+    dynamic_feat_size = 0
+    covariate_sizes = None
+    if args.use_covariates:
+        if not args.single_dataset:
+            raise ValueError("--use_covariates 目前仅支持 --single_dataset 模式")
+        covariate_sizes = get_covariate_feature_sizes(args.dataset_path, args.single_dataset)
+        dynamic_feat_size = sum(covariate_sizes.values())
+        if dynamic_feat_size == 0:
+            raise ValueError(
+                f"数据集 {args.single_dataset} 未提供任何协变量（动态/静态特征），无法启用 --use_covariates。"
+            )
+        print(
+            "协变量特征维度:",
+            covariate_sizes,
+            "总维度:",
+            dynamic_feat_size,
+        )
+
     # Cosine Annealing LR
     if args.use_cosine_annealing_lr:
         cosine_annealing_lr_args = {"T_max": args.cosine_annealing_lr_t_max, \
@@ -196,6 +221,9 @@ def train(args):
         cosine_annealing_lr_args = {}
 
     # Create the estimator
+    # -------- 构建 Lag-Llama 估计器 --------
+    # 这里将绝大多数训练超参、协变量开关、动态特征维度统一传入 Estimator，
+    # 由其负责创建数据管道和 LightningModule。
     estimator = LagLlamaEstimator(
         prediction_length=args.prediction_length,
         context_length=args.context_length,
@@ -205,8 +233,8 @@ def train(args):
         n_embd_per_head=args.n_embd_per_head,
         n_head=args.n_head,
         max_context_length=2048,
-        rope_scaling=None, 
-        scaling=args.data_normalization, 
+        rope_scaling=None,
+        scaling=args.data_normalization,
         lr=args.lr,
         weight_decay=args.weight_decay,
         distr_output=args.distr_output,
@@ -237,6 +265,9 @@ def train(args):
         num_batches_per_epoch=args.num_batches_per_epoch,
         num_parallel_samples=args.num_parallel_samples,
         time_feat=args.time_feat,
+        use_covariates=args.use_covariates,
+        dynamic_feat_size=dynamic_feat_size,
+        covariate_field_sizes=covariate_sizes if args.use_covariates else None,
         dropout=args.dropout,
         lags_seq=args.lags_seq,
         data_id_to_name_map=data_id_to_name_map,
@@ -274,7 +305,10 @@ def train(args):
     # Here we make a window slightly bigger so that instance sampler can sample from each window
     # An alternative is to have exact size and use different instance sampler (e.g. ValidationSplitSampler)
     # We change ValidationSplitSampler to add min_past
-    history_length = estimator.context_length + max(estimator.lags_seq)
+    # Calculate max_lag using original lag values (before 0-based conversion)
+    max_lag = estimator.max_lag_original if hasattr(estimator, 'max_lag_original') else (
+        max(estimator.lags_seq) + 1 if len(estimator.lags_seq) > 0 else 0)
+    history_length = estimator.context_length + max_lag
     prediction_length = args.prediction_length
     window_size = history_length + prediction_length
     print(
@@ -283,7 +317,7 @@ def train(args):
         "Prediction Length:",
         estimator.prediction_length,
         "max(lags_seq):",
-        max(estimator.lags_seq),
+        max_lag,
         "Therefore, window size:",
         window_size,
     )
@@ -291,22 +325,22 @@ def train(args):
     # Remove max(estimator.lags_seq) if the dataset is too small
     if args.use_single_instance_sampler:
         estimator.train_sampler = SingleInstanceSampler(
-            min_past=estimator.context_length + max(estimator.lags_seq),
+            min_past=estimator.context_length + max_lag,
             min_future=estimator.prediction_length,
         )
         estimator.validation_sampler = SingleInstanceSampler(
-            min_past=estimator.context_length + max(estimator.lags_seq),
+            min_past=estimator.context_length + max_lag,
             min_future=estimator.prediction_length,
         )
     else:
         estimator.train_sampler = ExpectedNumInstanceSampler(
             num_instances=1.0,
-            min_past=estimator.context_length + max(estimator.lags_seq),
+            min_past=estimator.context_length + max_lag,
             min_future=estimator.prediction_length,
         )
         estimator.validation_sampler = ExpectedNumInstanceSampler(
             num_instances=1.0,
-            min_past=estimator.context_length + max(estimator.lags_seq),
+            min_past=estimator.context_length + max_lag,
             min_future=estimator.prediction_length,
         )
 
@@ -360,10 +394,11 @@ def train(args):
             if args.stratified_sampling:
                 if args.stratified_sampling == "series":
                     train_weights = dataset_num_series
-                    val_weights = dataset_num_series + test_datasets_num_series # If there is just 1 series (airpassengers or saugeenday) this will fail
+                    val_weights = dataset_num_series + test_datasets_num_series  # If there is just 1 series (airpassengers or saugeenday) this will fail
                 elif args.stratified_sampling == "series_inverse":
-                    train_weights = [1/x for x in dataset_num_series]
-                    val_weights = [1/x for x in dataset_num_series + test_datasets_num_series] # If there is just 1 series (airpassengers or saugeenday) this will fail
+                    train_weights = [1 / x for x in dataset_num_series]
+                    val_weights = [1 / x for x in
+                                   dataset_num_series + test_datasets_num_series]  # If there is just 1 series (airpassengers or saugeenday) this will fail
                 elif args.stratified_sampling == "timesteps":
                     train_weights = dataset_train_num_points
                     val_weights = dataset_val_num_points + test_datasets_num_points
@@ -372,9 +407,9 @@ def train(args):
                     val_weights = [1 / x for x in dataset_val_num_points + test_datasets_num_points]
             else:
                 train_weights = val_weights = None
-                
+
             train_data = CombinedDataset(all_datasets, weights=train_weights)
-            val_data = CombinedDataset(val_datasets+test_datasets, weights=val_weights)
+            val_data = CombinedDataset(val_datasets + test_datasets, weights=val_weights)
         else:
             (
                 train_data,
@@ -399,6 +434,52 @@ def train(args):
                 "Total train points:", total_train_points,
                 "Total val points:", total_val_points,
             )
+
+            # Remove any existing ModelCheckpoint callbacks from both local and estimator callbacks
+            callbacks = [cb for cb in callbacks if not isinstance(cb, ModelCheckpoint)]
+            # Also remove from estimator's callbacks if they exist
+            if "callbacks" in estimator.trainer_kwargs:
+                estimator.trainer_kwargs["callbacks"] = [
+                    cb for cb in estimator.trainer_kwargs["callbacks"] 
+                    if not isinstance(cb, ModelCheckpoint)
+                ]
+
+            # Add early stopping and model checkpointing only if validation data exists
+            if total_val_points > 0:
+                early_stop_callback = EarlyStopping(
+                    monitor="val_loss",
+                    min_delta=0.00,
+                    patience=int(args.early_stopping_patience),
+                    verbose=True,
+                    mode="min",
+                    check_finite=True,
+                )
+                model_checkpointing = ModelCheckpoint(
+                    dirpath=checkpoint_dir,
+                    save_last=True,
+                    save_top_k=1,
+                    filename="best-{epoch}-{val_loss:.2f}",
+                    monitor="val_loss",
+                    mode="min",
+                )
+                callbacks.append(early_stop_callback)
+                callbacks.append(model_checkpointing)
+            else:
+                warnings.warn(
+                    "No validation data available. Early stopping and model checkpointing "
+                    "based on val_loss are disabled. Consider reducing num_validation_windows "
+                    "or adjusting context_length/prediction_length."
+                )
+                model_checkpointing_simple = ModelCheckpoint(
+                    dirpath=checkpoint_dir,
+                    save_last=True,
+                    save_top_k=1,
+                    filename="best-{epoch}",
+                )
+                callbacks.append(model_checkpointing_simple)
+
+            # Update callbacks in estimator's trainer_kwargs
+            estimator.trainer_kwargs["callbacks"] = callbacks
 
         # Batch size search since when we scale up, we might not be able to use the same batch size for all models
         if args.search_batch_size:
@@ -457,6 +538,136 @@ def train(args):
             print("\nUsing a batch size of", batch_size, "\n")
             wandb.config.update({"batch_size": batch_size}, allow_val_change=True)
 
+        # Final cleanup before training: ensure only one ModelCheckpoint in callbacks
+        # This prevents conflicts when Lightning creates the Trainer
+        # This is critical for newer versions of PyTorch Lightning that don't allow multiple ModelCheckpoints
+        final_callbacks = estimator.trainer_kwargs.get("callbacks", [])
+        if not isinstance(final_callbacks, list):
+            final_callbacks = list(final_callbacks) if final_callbacks else []
+        
+        # Debug: print all callbacks before cleanup
+        print(f"DEBUG: Total callbacks before cleanup: {len(final_callbacks)}")
+        for i, cb in enumerate(final_callbacks):
+            print(f"  Callback {i}: {type(cb).__name__}")
+            if isinstance(cb, ModelCheckpoint):
+                print(f"    - monitor: {getattr(cb, 'monitor', None)}")
+                print(f"    - dirpath: {getattr(cb, 'dirpath', None)}")
+        
+        model_checkpoint_callbacks = [cb for cb in final_callbacks if isinstance(cb, ModelCheckpoint)]
+        print(f"DEBUG: Found {len(model_checkpoint_callbacks)} ModelCheckpoint callbacks")
+        
+        if len(model_checkpoint_callbacks) > 1:
+            # Keep only the first one (or the one with monitor if available)
+            preferred_callback = None
+            for cb in model_checkpoint_callbacks:
+                if hasattr(cb, 'monitor') and cb.monitor is not None:
+                    preferred_callback = cb
+                    break
+            if preferred_callback is None:
+                preferred_callback = model_checkpoint_callbacks[0]
+
+            # Remove all ModelCheckpoint and add back only the preferred one
+            final_callbacks = [cb for cb in final_callbacks if not isinstance(cb, ModelCheckpoint)]
+            final_callbacks.append(preferred_callback)
+            estimator.trainer_kwargs["callbacks"] = final_callbacks
+            print(
+                f"WARNING: Found {len(model_checkpoint_callbacks)} ModelCheckpoint callbacks before training. "
+                f"Removed duplicates, keeping only one with monitor={getattr(preferred_callback, 'monitor', None)}."
+            )
+        elif len(model_checkpoint_callbacks) == 0:
+            # If no ModelCheckpoint exists, add a default one
+            default_checkpoint = ModelCheckpoint(
+                dirpath=checkpoint_dir,
+                save_last=True,
+                save_top_k=1,
+                filename="best-{epoch}",
+            )
+            final_callbacks.append(default_checkpoint)
+            estimator.trainer_kwargs["callbacks"] = final_callbacks
+            print("INFO: Added default ModelCheckpoint callback")
+        else:
+            # Exactly one ModelCheckpoint - ensure it's properly configured
+            estimator.trainer_kwargs["callbacks"] = final_callbacks
+            print(f"INFO: Using single ModelCheckpoint with monitor={getattr(model_checkpoint_callbacks[0], 'monitor', None)}")
+        
+        # CRITICAL: Disable automatic checkpointing in trainer_kwargs to prevent gluonts from adding another one
+        # This is a workaround for gluonts potentially adding a default ModelCheckpoint
+        estimator.trainer_kwargs["enable_checkpointing"] = True  # Keep checkpointing enabled, but we control the callback
+        
+        # Final verification: ensure only one ModelCheckpoint
+        final_verify_callbacks = estimator.trainer_kwargs.get("callbacks", [])
+        final_model_checkpoints = [cb for cb in final_verify_callbacks if isinstance(cb, ModelCheckpoint)]
+        if len(final_model_checkpoints) != 1:
+            print(f"ERROR: After cleanup, found {len(final_model_checkpoints)} ModelCheckpoint callbacks!")
+            print("Forcing to keep only the first one...")
+            final_verify_callbacks = [cb for cb in final_verify_callbacks if not isinstance(cb, ModelCheckpoint)]
+            if final_model_checkpoints:
+                final_verify_callbacks.append(final_model_checkpoints[0])
+            estimator.trainer_kwargs["callbacks"] = final_verify_callbacks
+
+        # Monkey patch to intercept Trainer creation and ensure only one ModelCheckpoint
+        # This is necessary because gluonts may add a default ModelCheckpoint in train_model
+        original_train_model = estimator.train_model
+        def patched_train_model(*args, **kwargs):
+            # Before calling original train_model, ensure callbacks are clean
+            if "callbacks" in estimator.trainer_kwargs:
+                callbacks = estimator.trainer_kwargs["callbacks"]
+                if not isinstance(callbacks, list):
+                    callbacks = list(callbacks) if callbacks else []
+                
+                model_checkpoints = [cb for cb in callbacks if isinstance(cb, ModelCheckpoint)]
+                if len(model_checkpoints) > 1:
+                    print(f"MONKEY PATCH: Found {len(model_checkpoints)} ModelCheckpoint callbacks, cleaning up...")
+                    # Keep the one with monitor if available, otherwise the first one
+                    preferred = None
+                    for cb in model_checkpoints:
+                        if hasattr(cb, 'monitor') and cb.monitor is not None:
+                            preferred = cb
+                            break
+                    if preferred is None:
+                        preferred = model_checkpoints[0]
+                    
+                    callbacks = [cb for cb in callbacks if not isinstance(cb, ModelCheckpoint)]
+                    callbacks.append(preferred)
+                    estimator.trainer_kwargs["callbacks"] = callbacks
+                    print(f"MONKEY PATCH: Cleaned up, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
+            
+            # Also patch pl.Trainer.__init__ to catch any last-minute additions
+            original_trainer_init = lightning.pytorch.trainer.Trainer.__init__
+            def patched_trainer_init(self, *args, **kwargs):
+                # Clean callbacks before Trainer initialization
+                if "callbacks" in kwargs:
+                    callbacks = kwargs["callbacks"]
+                    if callbacks:
+                        model_checkpoints = [cb for cb in callbacks if isinstance(cb, ModelCheckpoint)]
+                        if len(model_checkpoints) > 1:
+                            print(f"TRAINER INIT PATCH: Found {len(model_checkpoints)} ModelCheckpoint, cleaning...")
+                            preferred = None
+                            for cb in model_checkpoints:
+                                if hasattr(cb, 'monitor') and cb.monitor is not None:
+                                    preferred = cb
+                                    break
+                            if preferred is None:
+                                preferred = model_checkpoints[0]
+                            callbacks = [cb for cb in callbacks if not isinstance(cb, ModelCheckpoint)]
+                            callbacks.append(preferred)
+                            kwargs["callbacks"] = callbacks
+                            print(f"TRAINER INIT PATCH: Cleaned, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
+                
+                return original_trainer_init(self, *args, **kwargs)
+            
+            # Apply the patch
+            lightning.pytorch.trainer.Trainer.__init__ = patched_trainer_init
+            
+            try:
+                result = original_train_model(*args, **kwargs)
+            finally:
+                # Restore original
+                lightning.pytorch.trainer.Trainer.__init__ = original_trainer_init
+            
+            return result
+        
+        estimator.train_model = patched_train_model
 
         # Train
         train_output = estimator.train_model(
@@ -467,9 +678,32 @@ def train(args):
         )
 
         # Set checkpoint path before evaluating
-        best_model_path = train_output.trainer.checkpoint_callback.best_model_path
+        checkpoint_callback = train_output.trainer.checkpoint_callback
+        best_model_path = getattr(checkpoint_callback, "best_model_path", None)
+        if not best_model_path or not os.path.exists(best_model_path):
+            fallback_candidates = [
+                getattr(checkpoint_callback, "last_model_path", None),
+                os.path.join(checkpoint_dir, "last.ckpt"),
+            ]
+            for candidate in fallback_candidates:
+                if candidate and os.path.exists(candidate):
+                    best_model_path = candidate
+                    print(f"WARNING: best_model_path missing, falling back to {candidate}")
+                    break
+        if (not best_model_path or not os.path.exists(best_model_path)) and os.path.isdir(checkpoint_dir):
+            ckpt_files = sorted(
+                Path(checkpoint_dir).glob("*.ckpt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if ckpt_files:
+                best_model_path = str(ckpt_files[0])
+                print(f"WARNING: Using most recent checkpoint {best_model_path} for evaluation.")
+        if not best_model_path or not os.path.exists(best_model_path):
+            raise FileNotFoundError(
+                "训练未生成可用的 checkpoint，无法进入评估/测试阶段。"
+            )
         estimator.ckpt_path = best_model_path
-
 
     print("Using checkpoint:", estimator.ckpt_path, "for evaluation")
     # Make directory to store metrics
@@ -547,6 +781,7 @@ def train(args):
 
     wandb.finish()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
@@ -575,13 +810,15 @@ if __name__ == "__main__":
     # Model hyperparameters
     parser.add_argument("--context_length", type=int, default=256)
     parser.add_argument("--prediction_length", type=int, default=1)
-    parser.add_argument("--max_prediction_length", type=int, default=1024)
+    # parser.add_argument("--max_prediction_length", type=int, default=1024)
+    parser.add_argument("--max_prediction_length", type=int, default=2048)
     parser.add_argument("--n_layer", type=int, default=4)
     parser.add_argument("--num_encoder_layer", type=int, default=4, help="Only for lag-transformer")
     parser.add_argument("--n_embd_per_head", type=int, default=64)
     parser.add_argument("--n_head", type=int, default=4)
     parser.add_argument("--dim_feedforward", type=int, default=256)
-    parser.add_argument("--lags_seq", type=str, nargs="+", default=["QE", "ME", "W", "D", "h", "min", "s"])
+    # parser.add_argument("--lags_seq", type=str, nargs="+", default=["Q", "M", "W", "D", "H", "T", "S"])
+    parser.add_argument("--lags_seq", type=str, nargs="+", default=["D"])
 
     # Data normalization
     parser.add_argument(
@@ -740,6 +977,12 @@ if __name__ == "__main__":
         help="include time features",
         action="store_true",
     )
+    parser.add_argument(
+        "--use_covariates",
+        help="include feat_dynamic_real covariates (requires single dataset)",
+        action="store_true",
+        default=False,
+    )
 
     # Training arguments
     parser.add_argument("-b", "--batch_size", type=int, default=256)
@@ -832,7 +1075,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.args_from_dict_path:
-        with open(args.args_from_dict_path, "r") as read_file: loaded_args = json.load(read_file)
+        with open(args.args_from_dict_path, "r") as read_file:
+            loaded_args = json.load(read_file)
         for key, value in loaded_args.items():
             setattr(args, key, value)
 
