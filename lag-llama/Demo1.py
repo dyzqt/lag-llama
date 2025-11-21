@@ -1,4 +1,4 @@
-﻿from itertools import islice
+from itertools import islice
 
 from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
