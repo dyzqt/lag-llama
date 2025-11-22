@@ -66,7 +66,7 @@ gluonts_module.DistributionLoss = DistributionLoss
 gluonts_module.NegativeLogLikelihood = NegativeLogLikelihood
 
 def get_lag_llama_predictions(dataset, prediction_length, device, context_length=32, use_rope_scaling=False, num_samples=100):
-    ckpt = torch.load("/mnt/1pb-storage/wangshenghua/qingjuan/lag-llama/models/lag-llama.ckpt", map_location=device, weights_only=False) # Uses GPU since in this Colab we use a GPU.
+    ckpt = torch.load("/mnt/1pb-storage/wangshenghua/qingjuan/dyz/lag-llama/models/lag-llama.ckpt", map_location=device, weights_only=False) # Uses GPU since in this Colab we use a GPU.
     estimator_args = ckpt["hyper_parameters"]["model_kwargs"]
 
     rope_scaling_arguments = {
@@ -74,27 +74,18 @@ def get_lag_llama_predictions(dataset, prediction_length, device, context_length
         "factor": max(1.0, (context_length + prediction_length) / estimator_args["context_length"]),
     }
 
-    # Use the checkpoint's model_kwargs to ensure feature_size matches
-    # This is critical for loading the checkpoint weights correctly
-    # Note: lags_seq from checkpoint is stored as indices, but estimator expects frequency strings
-    # The create_lightning_module method will use the checkpoint's lags_seq directly
-    # Pass a minimal valid lags_seq to avoid errors in __init__, it will be overridden in create_lightning_module
     estimator = LagLlamaEstimator(
-        ckpt_path="/mnt/1pb-storage/wangshenghua/qingjuan/lag-llama/models/lag-llama.ckpt",
+        ckpt_path="/mnt/1pb-storage/wangshenghua/qingjuan/dyz/lag-llama/models/lag-llama.ckpt",
         prediction_length=prediction_length,
         context_length=context_length, # Lag-Llama was trained with a context length of 32, but can work with any context length
 
-        # estimator args - use values from checkpoint to ensure compatibility
+        # estimator args
         input_size=estimator_args["input_size"],
         n_layer=estimator_args["n_layer"],
         n_embd_per_head=estimator_args["n_embd_per_head"],
         n_head=estimator_args["n_head"],
         scaling=estimator_args["scaling"],
-        time_feat=estimator_args.get("time_feat", True),  # Use checkpoint value
-        dynamic_feat_size=estimator_args.get("dynamic_feat_size", 0),  # Use checkpoint value
-        use_covariates=estimator_args.get("use_covariates", False),  # Use checkpoint value
-        # Pass empty lags_seq - will be overridden by checkpoint's lags_seq in create_lightning_module
-        lags_seq=[],  # Empty list to avoid processing invalid frequencies in __init__
+        time_feat=estimator_args["time_feat"],
         rope_scaling=rope_scaling_arguments if use_rope_scaling else None,
 
         batch_size=1,
@@ -116,12 +107,16 @@ def get_lag_llama_predictions(dataset, prediction_length, device, context_length
 
     return forecasts, tss
 
+
+
+
 url = (
     "https://gist.githubusercontent.com/rsnirwan/a8b424085c9f44ef2598da74ce43e7a3"
     "/raw/b6fdef21fe1f654787fa0493846c546b7f9c4df2/ts_long.csv"
 )
 df = pd.read_csv(url, index_col=0, parse_dates=True)
 df.head()
+
 
 # Set numerical columns as float32
 for col in df.columns:
@@ -135,7 +130,9 @@ dataset = PandasDataset.from_long_dataframe(df, target="target", item_id="item_i
 backtest_dataset = dataset
 prediction_length = 24  # Define your prediction length. We use 24 here since the data is of hourly frequency
 num_samples = 100 # number of samples sampled from the probability distribution for each timestep
-device = torch.device("cuda:0") # You can switch this to CPU or other GPUs if you'd like, depending on your environment
+# device = torch.device("cpu") # You can switch this to CPU or other GPUs if you'd like, depending on your environment
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 forecasts, tss = get_lag_llama_predictions(backtest_dataset, prediction_length, device, num_samples)
 
@@ -157,3 +154,5 @@ plt.gcf().tight_layout()
 plt.legend()
 plt.savefig("results/forecast_results.png", dpi=300, bbox_inches='tight')
 plt.show()
+
+
