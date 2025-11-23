@@ -186,7 +186,7 @@ def _decode_required_flag(value: object) -> bool:
 def load_schema(path: Path) -> SchemaSpec:
     """从 CSV 文件加载 schema，并转换成 SchemaSpec 对象。"""
 
-    df = pd.read_csv(path, encoding="utf-8")  # 读取字段说明表
+    df = pd.read_csv(path, encoding="gbk")  # 读取字段说明表
     if "Unnamed: 8" in df.columns:  # 某些导出版本最后多出空列，需要去掉
         df = df.drop(columns=["Unnamed: 8"])
 

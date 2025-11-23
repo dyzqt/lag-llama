@@ -42,8 +42,6 @@ class ProcessedFeatures:
     expanded_dynamic_columns: List[str]  # 记录展开生成的列
     mappings: Dict[str, Dict[str, int]]  # 类别取值到编码的映射
     list_column_types: Dict[str, str]  # 记录列表字段目标类型（numeric / categorical）
-    vector_columns: List[str]  # 记录作为向量处理的列（LIST_NUMERIC类型，保留为向量形式）
-    vector_dimensions: Dict[str, int]  # 记录每个向量列的维度
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -162,8 +160,6 @@ def _infer_static_dynamic_columns(schema: SchemaSpec, df: pd.DataFrame) -> Proce
         expanded_dynamic_columns=[],
         mappings=mappings,
         list_column_types=list_column_types,
-        vector_columns=[],  # 初始化为空，在_expand_list_columns中填充
-        vector_dimensions={},  # 初始化为空，在_expand_list_columns中填充
     )
 
 
@@ -204,11 +200,9 @@ def _parse_list_value(value: object) -> List[float]:
 def _expand_list_columns(df: pd.DataFrame, features: ProcessedFeatures) -> ProcessedFeatures:
     """
     处理 list<...> 字段。
-    对于numeric类型的列表，保留为向量形式（不展开），每个时间点的值是一个向量。
-    对于categorical类型的列表，展开成多列。
+    将所有列表类型字段展开成多列，每个时间点的每个元素作为一个独立特征。
     """
     new_dynamic_names: List[str] = []  # 保存新生成的列名
-    vector_columns: List[str] = []  # 保存作为向量处理的列名
     
     for column, value_kind in list(features.list_column_types.items()):  # 遍历动态列表时复制一份避免原地修改
         if column not in df.columns:
@@ -221,38 +215,30 @@ def _expand_list_columns(df: pd.DataFrame, features: ProcessedFeatures) -> Proce
 
         length = len(sample)
         
+        # 所有列表类型都展开成多列
+        expanded_cols = [f"{column}__{idx:02d}" for idx in range(length)]  # 生成列名
+        for idx in range(length):  # 逐位置展开列表
+            df[expanded_cols[idx]] = parsed_lists.apply(
+                lambda lst, pos=idx: lst[pos] if len(lst) > pos else 0.0
+            )
+        new_dynamic_names.extend(expanded_cols)
+        df.drop(columns=[column], inplace=True)
+        
+        # 根据value_kind决定添加到哪个特征列表
         if value_kind == "categorical":
-            # 对于categorical类型，展开成多列
-            expanded_cols = [f"{column}__{idx:02d}" for idx in range(length)]  # 生成列名
-            for idx in range(length):  # 逐位置展开列表
-                df[expanded_cols[idx]] = parsed_lists.apply(
-                    lambda lst, pos=idx: lst[pos] if len(lst) > pos else 0.0
-                )
-            new_dynamic_names.extend(expanded_cols)
-            df.drop(columns=[column], inplace=True)
             if column in features.dynamic_categorical_columns:
                 features.dynamic_categorical_columns.remove(column)
             features.dynamic_categorical_columns.extend(expanded_cols)
         else:
-            # 对于numeric类型，保留为向量形式（存储为列表列）
-            # 将解析后的列表直接存储到DataFrame中
-            df[column] = parsed_lists
-            vector_columns.append(column)
-            # 记录向量维度
-            if not hasattr(features, 'vector_dimensions'):
-                features.vector_dimensions = {}
-            features.vector_dimensions[column] = length
-            # 保留在dynamic_numeric_columns中，但标记为向量列
-            if column not in features.dynamic_numeric_columns:
-                features.dynamic_numeric_columns.append(column)
+            # numeric类型添加到dynamic_numeric_columns
+            if column in features.dynamic_numeric_columns:
+                features.dynamic_numeric_columns.remove(column)
+            features.dynamic_numeric_columns.extend(expanded_cols)
         
         del features.list_column_types[column]
 
-    # 将向量列信息存储到ProcessedFeatures中
+    # 将展开的列信息存储到ProcessedFeatures中
     features.expanded_dynamic_columns = new_dynamic_names
-    if not hasattr(features, 'vector_columns'):
-        features.vector_columns = []
-    features.vector_columns.extend(vector_columns)
     
     return features
 
@@ -314,72 +300,37 @@ def _build_dynamic_feature_matrix(
     group_df: pd.DataFrame,
     *,
     value_kind: str = "float",
-    vector_columns: Optional[List[str]] = None,
 ) -> List[List[float]]:
     """
     将动态列抽取成二维列表，符合 GluonTS 输入格式。
-    对于向量列，将其展开成多个特征（每个向量维度作为一个特征）。
     """
     arrays: List[List[float]] = []
     is_float = value_kind == "float"
     fill_value = 0.0 if is_float else 0
     dtype = "float32" if is_float else "int32"
-    vector_columns = vector_columns or []
 
     for column in dynamic_columns:
         if column not in group_df.columns:
             arrays.append([fill_value] * len(group_df))
             continue
 
-        # 检查是否为向量列
-        if column in vector_columns:
-            # 向量列：每个时间点的值是一个向量列表
-            # 需要展开成多个特征（每个向量维度一个特征）
-            sample_vector = None
+        # 所有列都作为标量值处理
+        if is_float:
+            converted: List[float] = []
             for val in group_df[column]:
-                if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
-                    sample_vector = val
-                    break
-            
-            if sample_vector is None:
-                # 没有有效向量，跳过该列
-                continue
-            
-            vector_dim = len(sample_vector)
-            # 为每个向量维度创建一个特征
-            for dim_idx in range(vector_dim):
-                feature_values: List[float] = []
-                for val in group_df[column]:
-                    if isinstance(val, (list, tuple, np.ndarray)) and len(val) > dim_idx:
-                        num_val = _safe_float(val[dim_idx]) if is_float else None
-                        if num_val is not None:
-                            feature_values.append(num_val if is_float else float(num_val))
-                        else:
-                            try:
-                                feature_values.append(int(val[dim_idx]) if not is_float else float(val[dim_idx]))
-                            except (TypeError, ValueError, IndexError):
-                                feature_values.append(fill_value)
-                    else:
-                        feature_values.append(fill_value)
-                arrays.append(np.asarray(feature_values, dtype=dtype).tolist())
+                number = _safe_float(val)
+                converted.append(number if number is not None else fill_value)
         else:
-            # 普通列：标量值
-            if is_float:
-                converted: List[float] = []
-                for val in group_df[column]:
-                    number = _safe_float(val)
-                    converted.append(number if number is not None else fill_value)
-            else:
-                converted = []
-                for val in group_df[column]:
-                    if pd.isna(val):
+            converted = []
+            for val in group_df[column]:
+                if pd.isna(val):
+                    converted.append(fill_value)
+                else:
+                    try:
+                        converted.append(int(val))
+                    except (TypeError, ValueError):
                         converted.append(fill_value)
-                    else:
-                        try:
-                            converted.append(int(val))
-                        except (TypeError, ValueError):
-                            converted.append(fill_value)
-            arrays.append(np.asarray(converted, dtype=dtype).tolist())
+        arrays.append(np.asarray(converted, dtype=dtype).tolist())
     return arrays
 
 
@@ -428,7 +379,6 @@ def _make_record(
             dynamic_columns=dynamic_numeric_columns,
             group_df=working_df,
             value_kind="float",
-            vector_columns=getattr(static_info, 'vector_columns', []),
         )
     if dynamic_categorical_columns:
         record["feat_dynamic_cat"] = _build_dynamic_feature_matrix(
@@ -548,21 +498,7 @@ def prepare_dataset_from_schema(
     _write_jsonl_gz(output_dir / "train" / "data.json.gz", train_records)
     _write_jsonl_gz(output_dir / "test" / "data.json.gz", test_records)
 
-    # 构建feat_dynamic_real列表，对于向量列需要为每个维度创建一个特征
-    feat_dynamic_real_list = []
-    vector_columns = getattr(features, 'vector_columns', [])
-    vector_dimensions = getattr(features, 'vector_dimensions', {})
-    
-    for col in features.dynamic_numeric_columns:
-        if col in vector_columns:
-            # 向量列：为每个维度创建一个特征条目
-            vector_dim = vector_dimensions.get(col, 24)  # 默认24维，如果未记录则使用24
-            for idx in range(vector_dim):
-                feat_dynamic_real_list.append({"name": f"{col}__{idx:02d}"})
-        else:
-            # 普通列：单个特征
-            feat_dynamic_real_list.append({"name": col})
-    
+    # 构建 metadata
     metadata = {
         "freq": freq,
         "prediction_length": prediction_length,
@@ -573,7 +509,7 @@ def prepare_dataset_from_schema(
             for col in features.static_cat_columns
         ],
         "feat_static_real": [{"name": col} for col in features.static_real_columns],
-        "feat_dynamic_real": feat_dynamic_real_list,
+        "feat_dynamic_real": [{"name": col} for col in features.dynamic_numeric_columns],
         "dynamic_feature_source": "schema_v2",
     }
     if features.dynamic_categorical_columns:
