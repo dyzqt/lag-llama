@@ -20,10 +20,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from gluon_utils.scalers.robust_scaler import RobustScaler
 from gluonts.torch.distributions import DistributionOutput
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 from gluonts.torch.util import lagged_sequence_values, unsqueeze_expand
+
+from gluon_utils.scalers.robust_scaler import RobustScaler
 
 
 @dataclass
@@ -59,7 +60,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         inv_freq = 1.0 / (
-            self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
+                self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -101,12 +102,12 @@ class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
     """LlamaRotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
 
     def __init__(
-        self,
-        dim,
-        max_position_embeddings=2048,
-        base=10000,
-        device=None,
-        scaling_factor=1.0,
+            self,
+            dim,
+            max_position_embeddings=2048,
+            base=10000,
+            device=None,
+            scaling_factor=1.0,
     ):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base, device)
@@ -133,12 +134,12 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
     """LlamaRotaryEmbedding extended with Dynamic NTK scaling. Credits to the Reddit users /u/bloc97 and /u/emozilla"""
 
     def __init__(
-        self,
-        dim,
-        max_position_embeddings=2048,
-        base=10000,
-        device=None,
-        scaling_factor=1.0,
+            self,
+            dim,
+            max_position_embeddings=2048,
+            base=10000,
+            device=None,
+            scaling_factor=1.0,
     ):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base, device)
@@ -148,11 +149,11 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
 
         if seq_len > self.max_position_embeddings:
             base = self.base * (
-                (self.scaling_factor * seq_len / self.max_position_embeddings)
-                - (self.scaling_factor - 1)
+                    (self.scaling_factor * seq_len / self.max_position_embeddings)
+                    - (self.scaling_factor - 1)
             ) ** (self.dim / (self.dim - 2))
             inv_freq = 1.0 / (
-                base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
+                    base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
             )
             self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -174,7 +175,7 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -271,9 +272,9 @@ class CausalSelfAttention(nn.Module):
             )
         if rope_scaling_type in ["linear", "dynamic"]:
             if (
-                rope_scaling_factor is None
-                or not isinstance(rope_scaling_factor, float)
-                or rope_scaling_factor < 1.0
+                    rope_scaling_factor is None
+                    or not isinstance(rope_scaling_factor, float)
+                    or rope_scaling_factor < 1.0
             ):
                 raise ValueError(
                     f"`rope_scaling`'s factor field must be an float >= 1, got {rope_scaling_factor}"
@@ -318,15 +319,11 @@ class CausalSelfAttention(nn.Module):
                 # When kv_cache is in use and we're working with only the last token (T = 1 instead of full sequence length `true_seq_len``)
                 # Use the full sequence length for positional embeddings (true_seq_len)
                 # q is the query vector for the last token, so it's position is the last index (-1)
-                cos, sin = self.rotary_emb(
-                    device=v.device, dtype=v.dtype, seq_len=true_seq_len
-                )
+                cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=true_seq_len)
                 q, _ = apply_rotary_pos_emb(q, k, cos, sin, position_ids=[-1])
 
                 # k is the key matrix after concatenation with cache, so no position_ids
-                cos, sin = self.rotary_emb(
-                    device=v.device, dtype=v.dtype, seq_len=true_seq_len
-                )
+                cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=true_seq_len)
                 _, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids=None)
             else:
                 cos, sin = self.rotary_emb(device=v.device, dtype=v.dtype, seq_len=T)
@@ -414,29 +411,37 @@ class RMSNorm(nn.Module):
 
 
 class LagLlamaModel(nn.Module):
+    # Lag-Llama 主体：将滞后值/静态特征/时间特征/协变量拼接后送入 Transformer
     def __init__(
-        self,
-        context_length: int,
-        max_context_length: int,
-        scaling: str,
-        input_size: int,
-        n_layer: int,
-        n_embd_per_head: int,
-        n_head: int,
-        lags_seq: List[int],
-        distr_output: DistributionOutput,
-        rope_scaling=None,
-        num_parallel_samples: int = 100,
-        time_feat: bool = True,
-        dropout: float = 0.0,
+            self,
+            context_length: int,
+            max_context_length: int,
+            scaling: str,
+            input_size: int,
+            n_layer: int,
+            n_embd_per_head: int,
+            n_head: int,
+            lags_seq: List[int],
+            distr_output: DistributionOutput,
+            rope_scaling=None,
+            num_parallel_samples: int = 100,
+            time_feat: bool = True,
+            dynamic_feat_size: int = 0,
+            use_covariates: bool = False,
+            dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.context_length = context_length
         self.lags_seq = lags_seq
+        self.max_lag = max(self.lags_seq) if len(self.lags_seq) else 0
+        self.time_feat = time_feat
+        self.use_covariates = use_covariates
+        self.dynamic_feat_size = dynamic_feat_size
+        feature_size = input_size * (len(self.lags_seq)) + 2 * input_size
         if time_feat:
-            feature_size = input_size * (len(self.lags_seq)) + 2 * input_size + 6
-        else:
-            feature_size = input_size * (len(self.lags_seq)) + 2 * input_size
+            feature_size += 6
+        if use_covariates:
+            feature_size += dynamic_feat_size
 
         config = LTSMConfig(
             n_layer=n_layer,
@@ -485,75 +490,89 @@ class LagLlamaModel(nn.Module):
             )
 
     def prepare_input(
-        self,
-        past_target: torch.Tensor,
-        past_observed_values: torch.Tensor,
-        past_time_feat: Optional[torch.Tensor] = None,
-        future_time_feat: Optional[torch.Tensor] = None,
-        future_target: Optional[torch.Tensor] = None,
+            self,
+            past_target: torch.Tensor,
+            past_observed_values: torch.Tensor,
+            past_time_feat: Optional[torch.Tensor] = None,
+            future_time_feat: Optional[torch.Tensor] = None,
+            past_feat_dynamic_real: Optional[torch.Tensor] = None,
+            future_feat_dynamic_real: Optional[torch.Tensor] = None,
+            future_target: Optional[torch.Tensor] = None,
     ):
+        # 负责对输入进行标准化、截断与特征拼接，生成 Transformer 所需的 token
         scaled_past_target, loc, scale = self.scaler(
             past_target, past_observed_values
         )  # Data is standardized (past_observed_values is passed as "weights" parameter) # (bsz, context_length+max(self.lags_seq)
 
-        # In the below code, instead of max(self.lags_seq), it was previously -self.context_length
         if future_target is not None:
-            # Shape is (bsz, context_length+(pred_len-1))
             input = torch.cat(
                 (
-                    scaled_past_target[..., max(self.lags_seq) :],  # Just the context
-                    (future_target[..., :-1] - loc)
-                    / scale,  # Not sure about the -1 here. Maybe so since the last value isn't used in the model for prediction of any new values. also if the prediction length is 1, this doesn't really affect anything
+                    scaled_past_target[..., self.max_lag:],  # Just the context
+                    (future_target[..., :-1] - loc) / scale,
                 ),
                 dim=-1,
             )
         else:
-            input = scaled_past_target[..., max(self.lags_seq) :]
+            input = scaled_past_target[..., self.max_lag:]
+
+        time_feat = None
         if (past_time_feat is not None) and (future_time_feat is not None):
-            time_feat = (
-                torch.cat(
+            time_feat = torch.cat(
+                (
+                    past_time_feat[..., self.max_lag:, :],
+                    future_time_feat[..., :-1, :],
+                ),
+                dim=1,
+            )
+
+        dynamic_feat = None
+        if self.use_covariates and (past_feat_dynamic_real is not None):
+            if future_feat_dynamic_real is not None:
+                dynamic_feat = torch.cat(
                     (
-                        past_time_feat[..., max(self.lags_seq) :, :],
-                        future_time_feat[..., :-1, :],
+                        past_feat_dynamic_real[..., self.max_lag:, :],
+                        future_feat_dynamic_real[..., :-1, :],
                     ),
                     dim=1,
                 )
-                if future_time_feat is not None
-                else past_time_feat[..., max(self.lags_seq) :, :]
-            )
+            else:
+                dynamic_feat = past_feat_dynamic_real[..., self.max_lag:, :]
 
-        # This the history used to construct lags.  # bsz, max(self.lags_seq)
-        prior_input = (past_target[..., : max(self.lags_seq)] - loc) / scale
+        prior_input = (
+                              past_target[..., : self.max_lag] - loc
+                      ) / scale  # This the history used to construct lags.  # bsz, max(self.lags_seq)
 
-        # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
-        lags = lagged_sequence_values(self.lags_seq, prior_input, input, dim=-1)
+        lags = lagged_sequence_values(
+            self.lags_seq, prior_input, input, dim=-1
+        )  # Lags are added as an extra dim. Shape is (bsz, context_length+(pred_len-1), len(self.lags_seq))
 
-        # (bsz, 2) (loc and scale are concatenated)
-        static_feat = torch.cat((loc.abs().log1p(), scale.log()), dim=-1)
-        # (bsz, context_length+(pred_len-1), 2)
+        static_feat = torch.cat(
+            (loc.abs().log1p(), scale.log()), dim=-1
+        )  # (bsz, 2) (loc and scale are concatenated)
         expanded_static_feat = unsqueeze_expand(
             static_feat, dim=-2, size=lags.shape[-2]
-        )
+        )  # (bsz, context_length+(pred_len-1), 2)
         # expanded_static_feat: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
 
-        if past_time_feat is not None:
-            return (
-                torch.cat((lags, expanded_static_feat, time_feat), dim=-1),
-                loc,
-                scale,
-            )
-        else:
-            return torch.cat((lags, expanded_static_feat), dim=-1), loc, scale
+        features = [lags, expanded_static_feat]
+        if time_feat is not None:
+            features.append(time_feat)
+        if dynamic_feat is not None:
+            features.append(dynamic_feat)
+        return torch.cat(features, dim=-1), loc, scale
 
     def forward(
-        self,
-        past_target: torch.Tensor,
-        past_observed_values: torch.Tensor,
-        past_time_feat: Optional[torch.Tensor] = None,
-        future_time_feat: Optional[torch.Tensor] = None,
-        future_target: Optional[torch.Tensor] = None,
-        use_kv_cache: bool = False,
+            self,
+            past_target: torch.Tensor,
+            past_observed_values: torch.Tensor,
+            past_time_feat: Optional[torch.Tensor] = None,
+            future_time_feat: Optional[torch.Tensor] = None,
+            past_feat_dynamic_real: Optional[torch.Tensor] = None,
+            future_feat_dynamic_real: Optional[torch.Tensor] = None,
+            future_target: Optional[torch.Tensor] = None,
+            use_kv_cache: bool = False,
     ) -> torch.Tensor:
+        # 真正的前向推理：调用 prepare_input 构造序列，再堆叠注意力 Block 得到分布参数
         # if past_time_feat is not None:
         transformer_input, loc, scale = self.prepare_input(
             past_target=past_target,
@@ -561,6 +580,8 @@ class LagLlamaModel(nn.Module):
             future_target=future_target,
             past_time_feat=past_time_feat,
             future_time_feat=future_time_feat,
+            past_feat_dynamic_real=past_feat_dynamic_real,
+            future_feat_dynamic_real=future_feat_dynamic_real,
         )  # return: (bsz, context_length+(pred_len-1), len(self.lags_seq) + 2); (bsz, 1); (bsz, 1)
         # To use kv cache for inference and pass recent token to transformer
         if use_kv_cache and self.y_cache:
@@ -568,18 +589,20 @@ class LagLlamaModel(nn.Module):
             transformer_input = transformer_input[:, -1:]
 
         # forward the LLaMA model itself
-        # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
-        x = self.transformer.wte(transformer_input)
+        x = self.transformer.wte(
+            transformer_input
+        )  # token embeddings of shape (b, t, n_embd_per_head*n_head) # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
 
         for block in self.transformer.h:
             x = block(x, use_kv_cache)
-        # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
-        x = self.transformer.ln_f(x)
+        x = self.transformer.ln_f(
+            x
+        )  # (bsz, context_length+(pred_len-1), n_embd_per_head*n_head)
         if use_kv_cache:
             self.y_cache = True
-
-        # (bsz, context_length+(pred_len-1)) ; (bsz, context_length+(pred_len-1))
-        params = self.param_proj(x)
+        params = self.param_proj(
+            x
+        )  # (bsz, context_length+(pred_len-1)) ; (bsz, context_length+(pred_len-1))
         return params, loc, scale
 
     def reset_cache(self) -> None:
