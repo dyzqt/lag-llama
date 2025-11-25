@@ -68,43 +68,43 @@ class LagLlamaLightningModule(LightningModule):
 
     @validated()
     def __init__(
-        self,
-        model_kwargs: dict,
-        context_length: int,
-        prediction_length: int,
-        loss: DistributionLoss = NegativeLogLikelihood(),
-        lr: float = 1e-3,
-        weight_decay: float = 1e-8,
-        aug_prob: float = 0.1,
-        freq_mask_rate: float = 0.1,
-        freq_mixing_rate: float = 0.1,
-        jitter_prob: float = 0.0,
-        jitter_sigma: float = 0.03,
-        scaling_prob: float = 0.0,
-        scaling_sigma: float = 0.1,
-        rotation_prob: float = 0.0,
-        permutation_prob: float = 0.0,
-        permutation_max_segments: int = 5,
-        permutation_seg_mode: str = "equal",
-        magnitude_warp_prob: float = 0.0,
-        magnitude_warp_sigma: float = 0.2,
-        magnitude_warp_knot: int = 4,
-        time_warp_prob: float = 0.0,
-        time_warp_sigma: float = 0.2,
-        time_warp_knot: int = 4,
-        window_slice_prob: float = 0.0,
-        window_slice_reduce_ratio: float = 0.9,
-        window_warp_prob: float = 0.0,
-        window_warp_window_ratio: float = 0.1,
-        window_warp_scales: list = [0.5, 2.0],
-        data_id_to_name_map: dict = {},
-        use_cosine_annealing_lr: bool = False,
-        cosine_annealing_lr_args: dict = {},
-        track_loss_per_series: bool = False,
-        nonnegative_pred_samples: bool = False,
-        use_kv_cache: bool = True,
-        use_single_pass_sampling: bool = False,
-        covariate_field_sizes: Optional[dict] = None,
+            self,
+            model_kwargs: dict,
+            context_length: int,
+            prediction_length: int,
+            loss: DistributionLoss = NegativeLogLikelihood(),
+            lr: float = 1e-3,
+            weight_decay: float = 1e-8,
+            aug_prob: float = 0.1,
+            freq_mask_rate: float = 0.1,
+            freq_mixing_rate: float = 0.1,
+            jitter_prob: float = 0.0,
+            jitter_sigma: float = 0.03,
+            scaling_prob: float = 0.0,
+            scaling_sigma: float = 0.1,
+            rotation_prob: float = 0.0,
+            permutation_prob: float = 0.0,
+            permutation_max_segments: int = 5,
+            permutation_seg_mode: str = "equal",
+            magnitude_warp_prob: float = 0.0,
+            magnitude_warp_sigma: float = 0.2,
+            magnitude_warp_knot: int = 4,
+            time_warp_prob: float = 0.0,
+            time_warp_sigma: float = 0.2,
+            time_warp_knot: int = 4,
+            window_slice_prob: float = 0.0,
+            window_slice_reduce_ratio: float = 0.9,
+            window_warp_prob: float = 0.0,
+            window_warp_window_ratio: float = 0.1,
+            window_warp_scales: list = [0.5, 2.0],
+            data_id_to_name_map: dict = {},
+            use_cosine_annealing_lr: bool = False,
+            cosine_annealing_lr_args: dict = {},
+            track_loss_per_series: bool = False,
+            nonnegative_pred_samples: bool = False,
+            use_kv_cache: bool = True,
+            use_single_pass_sampling: bool = False,
+            covariate_field_sizes: Optional[dict] = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -221,16 +221,16 @@ class LagLlamaLightningModule(LightningModule):
         self.augmentations = ApplyAugmentations(self.transforms)
 
     def _build_covariate_matrices(
-        self,
-        past_dynamic_real: Optional[torch.Tensor],
-        future_dynamic_real: Optional[torch.Tensor],
-        past_dynamic_cat: Optional[torch.Tensor] = None,
-        future_dynamic_cat: Optional[torch.Tensor] = None,
-        static_real: Optional[torch.Tensor] = None,
-        static_cat: Optional[torch.Tensor] = None,
-        past_length: Optional[int] = None,
-        future_length: Optional[int] = None,
-        device: Optional[torch.device] = None,
+            self,
+            past_dynamic_real: Optional[torch.Tensor],
+            future_dynamic_real: Optional[torch.Tensor],
+            past_dynamic_cat: Optional[torch.Tensor] = None,
+            future_dynamic_cat: Optional[torch.Tensor] = None,
+            static_real: Optional[torch.Tensor] = None,
+            static_cat: Optional[torch.Tensor] = None,
+            past_length: Optional[int] = None,
+            future_length: Optional[int] = None,
+            device: Optional[torch.device] = None,
     ):
         if not self.use_covariates:
             return None, None
@@ -339,9 +339,11 @@ class LagLlamaLightningModule(LightningModule):
                 params, loc, scale = self.model(
                     *args,
                     past_time_feat=past_time_feat if self.time_feat else None,
-                    future_time_feat=future_time_feat[..., : t + 1, :] if (self.time_feat and future_time_feat is not None) else None,
+                    future_time_feat=future_time_feat[..., : t + 1, :] if (
+                                self.time_feat and future_time_feat is not None) else None,
                     past_feat_dynamic_real=past_feat_dynamic_real,
-                    future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1, :] if future_feat_dynamic_real is not None else None,
+                    future_feat_dynamic_real=future_feat_dynamic_real[..., : t + 1,
+                                             :] if future_feat_dynamic_real is not None else None,
                     past_target=past_target,
                     past_observed_values=past_observed_values,
                     use_kv_cache=self.use_kv_cache,
@@ -352,22 +354,23 @@ class LagLlamaLightningModule(LightningModule):
                 ]  # Take the last timestep predicted. Each tensor is of shape (#bsz, 1)
                 # Singular distribution is used for getting the greedy prediction (mean)
                 distr = self.model.distr_output.distribution(sliced_params, loc, scale)
-                greedy_prediction = distr.mean # (#bsz, 1)
+                greedy_prediction = distr.mean  # (#bsz, 1)
 
                 repeated_sliced_params = [
-                        p[:, -1:].repeat_interleave(
+                    p[:, -1:].repeat_interleave(
                         self.model.num_parallel_samples, 0
                     ) for p in params
-                ] # Take the last timestep predicted and repeat for number of samples. Each tensor is of shape (#bsz*#parallel_samples, 1)
+                ]  # Take the last timestep predicted and repeat for number of samples. Each tensor is of shape (#bsz*#parallel_samples, 1)
                 repeated_loc = loc.repeat_interleave(
-                        self.model.num_parallel_samples, 0
-                    )
+                    self.model.num_parallel_samples, 0
+                )
                 repeated_scale = scale.repeat_interleave(
-                        self.model.num_parallel_samples, 0
-                    )
+                    self.model.num_parallel_samples, 0
+                )
                 # Repeated distribution is used for getting the parallel samples
                 # (distr.sample([self.model.num_parallel_samples]) seems to give terrible results)
-                repeated_distr = self.model.distr_output.distribution(repeated_sliced_params, repeated_loc, repeated_scale)
+                repeated_distr = self.model.distr_output.distribution(repeated_sliced_params, repeated_loc,
+                                                                      repeated_scale)
                 sample = repeated_distr.sample()  # (#bsz*#parallel_samples, 1)
                 if self.nonnegative_pred_samples:
                     sample = F.relu(sample)
@@ -388,7 +391,8 @@ class LagLlamaLightningModule(LightningModule):
                 repeated_past_time_feat = None
                 repeated_future_time_feat = None
             if past_feat_dynamic_real is not None:
-                repeated_past_feat_dynamic_real = past_feat_dynamic_real.repeat_interleave(self.model.num_parallel_samples, 0)
+                repeated_past_feat_dynamic_real = past_feat_dynamic_real.repeat_interleave(
+                    self.model.num_parallel_samples, 0)
                 repeated_future_feat_dynamic_real = (
                     future_feat_dynamic_real.repeat_interleave(self.model.num_parallel_samples, 0)
                     if future_feat_dynamic_real is not None
@@ -403,9 +407,11 @@ class LagLlamaLightningModule(LightningModule):
                     params, loc, scale = self.model(
                         *args,
                         past_time_feat=repeated_past_time_feat,
-                        future_time_feat=repeated_future_time_feat[..., : t + 1, :] if repeated_future_time_feat is not None else None,
+                        future_time_feat=repeated_future_time_feat[..., : t + 1,
+                                         :] if repeated_future_time_feat is not None else None,
                         past_feat_dynamic_real=repeated_past_feat_dynamic_real,
-                        future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1, :] if repeated_future_feat_dynamic_real is not None else None,
+                        future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1,
+                                                 :] if repeated_future_feat_dynamic_real is not None else None,
                         past_target=repeated_past_target,
                         past_observed_values=repeated_past_observed_values,
                         use_kv_cache=self.use_kv_cache,
@@ -416,7 +422,8 @@ class LagLlamaLightningModule(LightningModule):
                         past_time_feat=None,
                         future_time_feat=None,
                         past_feat_dynamic_real=repeated_past_feat_dynamic_real,
-                        future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1, :] if repeated_future_feat_dynamic_real is not None else None,
+                        future_feat_dynamic_real=repeated_future_feat_dynamic_real[..., : t + 1,
+                                                 :] if repeated_future_feat_dynamic_real is not None else None,
                         past_target=repeated_past_target,
                         past_observed_values=repeated_past_observed_values,
                         use_kv_cache=self.use_kv_cache,
@@ -441,7 +448,6 @@ class LagLlamaLightningModule(LightningModule):
             (-1, self.model.num_parallel_samples, self.prediction_length)
             + self.model.distr_output.event_shape,
         )
-
 
     # train
     def _compute_loss(self, batch, do_not_average=False, return_observed_values=False):
@@ -502,21 +508,21 @@ class LagLlamaLightningModule(LightningModule):
 
         future_target_reshaped = future_target.reshape(
             -1,
-            *future_target.shape[extra_dims + 1 :],
+            *future_target.shape[extra_dims + 1:],
         )  # (bsz, model.prediction_length)
         future_observed_reshaped = future_observed_values.reshape(
             -1,
-            *future_observed_values.shape[extra_dims + 1 :],
+            *future_observed_values.shape[extra_dims + 1:],
         )  # (bsz, model.prediction_length)
         if future_feat_dynamic_real is not None:
             future_feat_dynamic_real = future_feat_dynamic_real.reshape(
                 -1,
-                *future_feat_dynamic_real.shape[extra_dims + 1 :],
+                *future_feat_dynamic_real.shape[extra_dims + 1:],
             )
         if future_feat_dynamic_cat is not None:
             future_feat_dynamic_cat = future_feat_dynamic_cat.reshape(
                 -1,
-                *future_feat_dynamic_cat.shape[extra_dims + 1 :],
+                *future_feat_dynamic_cat.shape[extra_dims + 1:],
             )
 
         if self.use_covariates:
@@ -542,13 +548,13 @@ class LagLlamaLightningModule(LightningModule):
             future_feat_dynamic_real=future_feat_dynamic_real,
             future_target=future_target_reshaped,
         )  # distr_args is a tuple with two tensors of shape (bsz, context_length+pred_len-1)
-        
+
         # Debug: Check dimensions
         if isinstance(distr_args, tuple):
             distr_shape = distr_args[0].shape if len(distr_args) > 0 else None
         else:
             distr_shape = distr_args.shape
-        
+
         context_target = take_last(
             past_target, dim=-1, num=self.context_length - 1
         )  # (bsz, context_length-1) # Basically removes the first value since it cannot be predicted
@@ -562,7 +568,7 @@ class LagLlamaLightningModule(LightningModule):
         observed_values = torch.cat(
             (context_observed, future_observed_reshaped), dim=1
         )  # same as target but for observed_values tensor
-        
+
         # Debug: Print shapes for troubleshooting and fix dimension mismatch
         if distr_shape is not None and target.shape[1] != distr_shape[1]:
             print(f"WARNING: Shape mismatch detected!")
@@ -574,7 +580,7 @@ class LagLlamaLightningModule(LightningModule):
             print(f"  distr_args shape: {distr_shape}")
             print(f"  Expected distr shape: (bsz, {self.context_length + self.prediction_length - 1})")
             print(f"  Expected target shape: (bsz, {self.context_length - 1 + self.prediction_length})")
-            
+
             # Fix: Adjust target to match distr_args shape
             if target.shape[1] > distr_shape[1]:
                 # Target is too long, truncate it
@@ -591,13 +597,13 @@ class LagLlamaLightningModule(LightningModule):
         if type(self.model.distr_output) == ImplicitQuantileNetworkOutput:
             if not do_not_average:
                 loss = (
-                    self.model.distr_output.loss(target, distr_args, loc, scale)
-                    * observed_values
-                ).sum() / observed_values.sum().clamp_min(1.0)
+                               self.model.distr_output.loss(target, distr_args, loc, scale)
+                               * observed_values
+                       ).sum() / observed_values.sum().clamp_min(1.0)
             else:
                 loss = (
-                    self.model.distr_output.loss(target, distr_args, loc, scale)
-                    * observed_values
+                        self.model.distr_output.loss(target, distr_args, loc, scale)
+                        * observed_values
                 )
         else:
             distr = self.model.distr_output.distribution(
@@ -605,8 +611,8 @@ class LagLlamaLightningModule(LightningModule):
             )  # an object representing a distribution with the specified parameters. We need this to compute the NLL loss.
             if not do_not_average:
                 loss = (
-                    self.loss(distr, target) * observed_values
-                ).sum() / observed_values.sum().clamp_min(1.0)
+                               self.loss(distr, target) * observed_values
+                       ).sum() / observed_values.sum().clamp_min(1.0)
             else:
                 loss = self.loss(distr, target) * observed_values
 

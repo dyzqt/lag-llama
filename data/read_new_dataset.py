@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import warnings
+
 warnings.simplefilter(action="ignore", category=FutureWarning)
 warnings.simplefilter(action="ignore", category=UserWarning)
 
@@ -22,100 +23,61 @@ from pathlib import Path
 from gluonts.dataset.repository.datasets import get_dataset
 import os
 
-def create_train_dataset_without_last_k_timesteps(
-    raw_train_dataset,
-    freq,
-    k=0
-):
+
+def create_train_dataset_without_last_k_timesteps(raw_train_dataset, freq, k=0):
     train_data = []
     for i, series in enumerate(raw_train_dataset):
         s_train = series.copy()
-        s_train["target"] = s_train["target"][:len(s_train["target"])-k]
+        s_train["target"] = s_train["target"][: len(s_train["target"]) - k]
         train_data.append(s_train)
     train_data = ListDataset(train_data, freq=freq)
     return train_data
 
+
 def load_jsonl_gzip_file(file_path):
-    with gzip.open(file_path, 'rt') as f:
+    with gzip.open(file_path, "rt") as f:
         return [json.loads(line) for line in f]
 
+
 def get_ett_dataset(dataset_name, path):
-    """
-    Load ETT dataset with improved error handling.
-    Updated: 2024-11-09 - Added file existence checks and better error messages.
-    """
     dataset_path = Path(path) / dataset_name
-    metadata_path = dataset_path / 'metadata.json'
-    
-    # Check if metadata file exists before attempting to open (Updated 2024-11-09)
-    if not metadata_path.exists():
-        try:
-            resolved_path = str(metadata_path.resolve())
-        except (OSError, RuntimeError):
-            resolved_path = str(metadata_path)
-        raise FileNotFoundError(
-            f"ETT dataset '{dataset_name}' not found at expected path: {metadata_path}\n"
-            f"Resolved absolute path: {resolved_path}\n"
-            f"Expected structure: {path}/{dataset_name}/\n"
-            f"  - metadata.json\n"
-            f"  - train/data.json.gz\n"
-            f"  - test/data.json.gz\n"
-            f"Please ensure the dataset exists at the specified path or check that --dataset_path is correct.\n"
-            f"Current working directory: {Path.cwd()}"
-        )
-    
-    try:
-        with open(metadata_path, 'r') as f:
-            metadata_dict = json.load(f)
-            metadata = MetaData(**metadata_dict)
-    except FileNotFoundError as e:
-        # Provide helpful error message if file not found (handles both old and new code paths)
-        try:
-            resolved_path = str(metadata_path.resolve())
-        except (OSError, RuntimeError):
-            resolved_path = str(metadata_path)
-        raise FileNotFoundError(
-            f"ETT dataset '{dataset_name}' not found at expected path: {metadata_path}\n"
-            f"Resolved absolute path: {resolved_path}\n"
-            f"Expected structure: {path}/{dataset_name}/\n"
-            f"  - metadata.json\n"
-            f"  - train/data.json.gz\n"
-            f"  - test/data.json.gz\n"
-            f"Please ensure the dataset exists at the specified path or check that --dataset_path is correct.\n"
-            f"Current working directory: {Path.cwd()}\n"
-            f"Original error: {str(e)}"
-        ) from e
+    metadata_path = dataset_path / "metadata.json"
+    with open(metadata_path, "r") as f:
+        metadata_dict = json.load(f)
+        metadata = MetaData(**metadata_dict)
     # Load train and test datasets
-    train_data_path = dataset_path / 'train' / 'data.json.gz'
-    test_data_path = dataset_path / 'test' / 'data.json.gz'
-    
-    if not test_data_path.exists():
-        raise FileNotFoundError(
-            f"Test data file not found for ETT dataset '{dataset_name}': {test_data_path}\n"
-            f"Please ensure the dataset is properly formatted."
-        )
-    
+    train_data_path = dataset_path / "train" / "data.json.gz"
+    test_data_path = dataset_path / "test" / "data.json.gz"
     # test dataset
     test_data = load_jsonl_gzip_file(test_data_path)
     # Create GluonTS ListDatasets
     test_ds = ListDataset(test_data, freq=metadata.freq)
-    train_ds = create_train_dataset_without_last_k_timesteps(test_ds, freq=metadata.freq, k=24)
+    train_ds = create_train_dataset_without_last_k_timesteps(
+        test_ds, freq=metadata.freq, k=24
+    )
     return TrainDatasets(metadata=metadata, train=train_ds, test=test_ds)
+
 
 if __name__ == "__main__":
     dataset_name = "ett_h1"
 
     if dataset_name in ("ett_h1", "ett_h2", "ett_m1", "ett_m2"):
-        # path = "data/datasets/ett_datasets"
-        path = "/mnt/1pb-storage/wangshenghua/qingjuan/lag-llama/dataset"
+        path = "data/datasets/ett_datasets"
         ds = get_ett_dataset(dataset_name, path)
-    
-    if dataset_name in ("cpu_limit_minute", "cpu_usage_minute", \
-                        "function_delay_minute", "instances_minute", \
-                        "memory_limit_minute", "memory_usage_minute", \
-                        "platform_delay_minute", "requests_minute"):
-        path = "/mnt/1pb-storage/wangshenghua/qingjuan/lag-llama/dataset/huawei/" + dataset_name + ".json"
-        with open(path, "r") as f: data = json.load(f)
+
+    if dataset_name in (
+        "cpu_limit_minute",
+        "cpu_usage_minute",
+        "function_delay_minute",
+        "instances_minute",
+        "memory_limit_minute",
+        "memory_usage_minute",
+        "platform_delay_minute",
+        "requests_minute",
+    ):
+        path = "data/datasets/huawei/" + dataset_name + ".json"
+        with open(path, "r") as f:
+            data = json.load(f)
         metadata = MetaData(**data["metadata"])
         train_data = [x for x in data["train"] if type(x["target"][0]) != str]
         test_data = [x for x in data["test"] if type(x["target"][0]) != str]
@@ -124,11 +86,13 @@ if __name__ == "__main__":
         ds = TrainDatasets(metadata=metadata, train=train_ds, test=test_ds)
 
     if dataset_name in ("beijing_pm25", "AirQualityUCI", "beijing_multisite"):
-        path = "/mnt/1pb-storage/wangshenghua/qingjuan/lag-llama/dataset/air_quality/" + dataset_name + ".json"
+        path = "data/datasets/air_quality/" + dataset_name + ".json"
         with open(path, "r") as f:
             data = json.load(f)
         metadata = MetaData(**data["metadata"])
         train_test_data = [x for x in data["data"] if type(x["target"][0]) != str]
         full_dataset = ListDataset(train_test_data, freq=metadata.freq)
-        train_ds = create_train_dataset_without_last_k_timesteps(full_dataset, freq=metadata.freq, k=24)
+        train_ds = create_train_dataset_without_last_k_timesteps(
+            test_ds, freq=metadata.freq, k=24
+        )
         ds = TrainDatasets(metadata=metadata, train=train_ds, test=full_dataset)

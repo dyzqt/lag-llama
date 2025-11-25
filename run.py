@@ -440,7 +440,7 @@ def train(args):
             # Also remove from estimator's callbacks if they exist
             if "callbacks" in estimator.trainer_kwargs:
                 estimator.trainer_kwargs["callbacks"] = [
-                    cb for cb in estimator.trainer_kwargs["callbacks"] 
+                    cb for cb in estimator.trainer_kwargs["callbacks"]
                     if not isinstance(cb, ModelCheckpoint)
                 ]
 
@@ -544,7 +544,7 @@ def train(args):
         final_callbacks = estimator.trainer_kwargs.get("callbacks", [])
         if not isinstance(final_callbacks, list):
             final_callbacks = list(final_callbacks) if final_callbacks else []
-        
+
         # Debug: print all callbacks before cleanup
         print(f"DEBUG: Total callbacks before cleanup: {len(final_callbacks)}")
         for i, cb in enumerate(final_callbacks):
@@ -552,10 +552,10 @@ def train(args):
             if isinstance(cb, ModelCheckpoint):
                 print(f"    - monitor: {getattr(cb, 'monitor', None)}")
                 print(f"    - dirpath: {getattr(cb, 'dirpath', None)}")
-        
+
         model_checkpoint_callbacks = [cb for cb in final_callbacks if isinstance(cb, ModelCheckpoint)]
         print(f"DEBUG: Found {len(model_checkpoint_callbacks)} ModelCheckpoint callbacks")
-        
+
         if len(model_checkpoint_callbacks) > 1:
             # Keep only the first one (or the one with monitor if available)
             preferred_callback = None
@@ -588,12 +588,14 @@ def train(args):
         else:
             # Exactly one ModelCheckpoint - ensure it's properly configured
             estimator.trainer_kwargs["callbacks"] = final_callbacks
-            print(f"INFO: Using single ModelCheckpoint with monitor={getattr(model_checkpoint_callbacks[0], 'monitor', None)}")
-        
+            print(
+                f"INFO: Using single ModelCheckpoint with monitor={getattr(model_checkpoint_callbacks[0], 'monitor', None)}")
+
         # CRITICAL: Disable automatic checkpointing in trainer_kwargs to prevent gluonts from adding another one
         # This is a workaround for gluonts potentially adding a default ModelCheckpoint
-        estimator.trainer_kwargs["enable_checkpointing"] = True  # Keep checkpointing enabled, but we control the callback
-        
+        estimator.trainer_kwargs[
+            "enable_checkpointing"] = True  # Keep checkpointing enabled, but we control the callback
+
         # Final verification: ensure only one ModelCheckpoint
         final_verify_callbacks = estimator.trainer_kwargs.get("callbacks", [])
         final_model_checkpoints = [cb for cb in final_verify_callbacks if isinstance(cb, ModelCheckpoint)]
@@ -608,13 +610,14 @@ def train(args):
         # Monkey patch to intercept Trainer creation and ensure only one ModelCheckpoint
         # This is necessary because gluonts may add a default ModelCheckpoint in train_model
         original_train_model = estimator.train_model
+
         def patched_train_model(*args, **kwargs):
             # Before calling original train_model, ensure callbacks are clean
             if "callbacks" in estimator.trainer_kwargs:
                 callbacks = estimator.trainer_kwargs["callbacks"]
                 if not isinstance(callbacks, list):
                     callbacks = list(callbacks) if callbacks else []
-                
+
                 model_checkpoints = [cb for cb in callbacks if isinstance(cb, ModelCheckpoint)]
                 if len(model_checkpoints) > 1:
                     print(f"MONKEY PATCH: Found {len(model_checkpoints)} ModelCheckpoint callbacks, cleaning up...")
@@ -626,14 +629,16 @@ def train(args):
                             break
                     if preferred is None:
                         preferred = model_checkpoints[0]
-                    
+
                     callbacks = [cb for cb in callbacks if not isinstance(cb, ModelCheckpoint)]
                     callbacks.append(preferred)
                     estimator.trainer_kwargs["callbacks"] = callbacks
-                    print(f"MONKEY PATCH: Cleaned up, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
-            
+                    print(
+                        f"MONKEY PATCH: Cleaned up, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
+
             # Also patch pl.Trainer.__init__ to catch any last-minute additions
             original_trainer_init = lightning.pytorch.trainer.Trainer.__init__
+
             def patched_trainer_init(self, *args, **kwargs):
                 # Clean callbacks before Trainer initialization
                 if "callbacks" in kwargs:
@@ -652,21 +657,22 @@ def train(args):
                             callbacks = [cb for cb in callbacks if not isinstance(cb, ModelCheckpoint)]
                             callbacks.append(preferred)
                             kwargs["callbacks"] = callbacks
-                            print(f"TRAINER INIT PATCH: Cleaned, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
-                
+                            print(
+                                f"TRAINER INIT PATCH: Cleaned, keeping ModelCheckpoint with monitor={getattr(preferred, 'monitor', None)}")
+
                 return original_trainer_init(self, *args, **kwargs)
-            
+
             # Apply the patch
             lightning.pytorch.trainer.Trainer.__init__ = patched_trainer_init
-            
+
             try:
                 result = original_train_model(*args, **kwargs)
             finally:
                 # Restore original
                 lightning.pytorch.trainer.Trainer.__init__ = original_trainer_init
-            
+
             return result
-        
+
         estimator.train_model = patched_train_model
 
         # Train

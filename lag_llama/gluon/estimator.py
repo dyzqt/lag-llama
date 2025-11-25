@@ -107,64 +107,64 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
 
     @validated()
     def __init__(
-        self,
-        prediction_length: int,
-        context_length: Optional[int] = None,
-        input_size: int = 1,
-        n_layer: int = 1,
-        n_embd_per_head: int = 32,
-        n_head: int = 4,
-        max_context_length: int = 2048,
-        rope_scaling=None,
-        scaling: Optional[str] = "mean",
-        lr: float = 1e-3,
-        weight_decay: float = 1e-8,
-        # Augmentations arguments
-        aug_prob: float = 0.1,
-        freq_mask_rate: float = 0.1,
-        freq_mixing_rate: float = 0.1,
-        jitter_prob: float = 0.0,
-        jitter_sigma: float = 0.03,
-        scaling_prob: float = 0.0,
-        scaling_sigma: float = 0.1,
-        rotation_prob: float = 0.0,
-        permutation_prob: float = 0.0,
-        permutation_max_segments: int = 5,
-        permutation_seg_mode: str = "equal",
-        magnitude_warp_prob: float = 0.0,
-        magnitude_warp_sigma: float = 0.2,
-        magnitude_warp_knot: int = 4,
-        time_warp_prob: float = 0.0,
-        time_warp_sigma: float = 0.2,
-        time_warp_knot: int = 4,
-        window_slice_prob: float = 0.0,
-        window_slice_reduce_ratio: float = 0.9,
-        window_warp_prob: float = 0.0,
-        window_warp_window_ratio: float = 0.1,
-        window_warp_scales: list = [0.5, 2.0],
-        # Continuning model arguments
-        distr_output: str = "studentT",
-        loss: DistributionLoss = NegativeLogLikelihood(),
-        num_parallel_samples: int = 100,
-        batch_size: int = 32,
-        num_batches_per_epoch: int = 50,
-        trainer_kwargs: Optional[Dict[str, Any]] = None,
-        train_sampler: Optional[InstanceSampler] = None,
-        validation_sampler: Optional[InstanceSampler] = None,
-        time_feat: bool = False,
-        dynamic_feat_size: int = 0,
-        use_covariates: bool = False,
-        dropout: float = 0.0,
-        lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
-        data_id_to_name_map: dict = {},
-        use_cosine_annealing_lr: bool = False,
-        cosine_annealing_lr_args: dict = {},
-        track_loss_per_series: bool = False,
-        ckpt_path: Optional[str] = None,
-        nonnegative_pred_samples: bool = False,
-        use_single_pass_sampling: bool = False,
-        device: torch.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
-        covariate_field_sizes: Optional[Dict[str, int]] = None,
+            self,
+            prediction_length: int,
+            context_length: Optional[int] = None,
+            input_size: int = 1,
+            n_layer: int = 1,
+            n_embd_per_head: int = 32,
+            n_head: int = 4,
+            max_context_length: int = 2048,
+            rope_scaling=None,
+            scaling: Optional[str] = "mean",
+            lr: float = 1e-3,
+            weight_decay: float = 1e-8,
+            # Augmentations arguments
+            aug_prob: float = 0.1,
+            freq_mask_rate: float = 0.1,
+            freq_mixing_rate: float = 0.1,
+            jitter_prob: float = 0.0,
+            jitter_sigma: float = 0.03,
+            scaling_prob: float = 0.0,
+            scaling_sigma: float = 0.1,
+            rotation_prob: float = 0.0,
+            permutation_prob: float = 0.0,
+            permutation_max_segments: int = 5,
+            permutation_seg_mode: str = "equal",
+            magnitude_warp_prob: float = 0.0,
+            magnitude_warp_sigma: float = 0.2,
+            magnitude_warp_knot: int = 4,
+            time_warp_prob: float = 0.0,
+            time_warp_sigma: float = 0.2,
+            time_warp_knot: int = 4,
+            window_slice_prob: float = 0.0,
+            window_slice_reduce_ratio: float = 0.9,
+            window_warp_prob: float = 0.0,
+            window_warp_window_ratio: float = 0.1,
+            window_warp_scales: list = [0.5, 2.0],
+            # Continuning model arguments
+            distr_output: str = "studentT",
+            loss: DistributionLoss = NegativeLogLikelihood(),
+            num_parallel_samples: int = 100,
+            batch_size: int = 32,
+            num_batches_per_epoch: int = 50,
+            trainer_kwargs: Optional[Dict[str, Any]] = None,
+            train_sampler: Optional[InstanceSampler] = None,
+            validation_sampler: Optional[InstanceSampler] = None,
+            time_feat: bool = False,
+            dynamic_feat_size: int = 0,
+            use_covariates: bool = False,
+            dropout: float = 0.0,
+            lags_seq: list = ["Q", "M", "W", "D", "H", "T", "S"],
+            data_id_to_name_map: dict = {},
+            use_cosine_annealing_lr: bool = False,
+            cosine_annealing_lr_args: dict = {},
+            track_loss_per_series: bool = False,
+            ckpt_path: Optional[str] = None,
+            nonnegative_pred_samples: bool = False,
+            use_single_pass_sampling: bool = False,
+            device: torch.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
+            covariate_field_sizes: Optional[Dict[str, int]] = None,
     ) -> None:
         default_trainer_kwargs = {"max_epochs": 100}
         if trainer_kwargs is not None:
@@ -197,10 +197,10 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             # But cap at 365 to avoid requiring too much history
             ctx_len = context_length or 64
             max_lag_limit = min(365, ctx_len * 3)
-            
+
             original_max = max(lag_indices)
             lag_indices = [lag for lag in lag_indices if lag <= max_lag_limit]
-            
+
             if len(lag_indices) == 0:
                 # If all lags were filtered out, use a default small lag
                 warnings.warn(
@@ -212,7 +212,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                     f"Some lag indices exceeded limit {max_lag_limit} (max was {original_max}). "
                     f"Filtered lags to max {max_lag_limit}."
                 )
-            
+
             # Store original lag indices for past_length calculation
             self.max_lag_original = max(lag_indices)
             # Convert to 0-based indexing for model use
@@ -353,7 +353,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             # Load checkpoint to get the original model_kwargs
             ckpt = torch.load(self.ckpt_path, map_location=self.device, weights_only=False)
             ckpt_model_kwargs = ckpt["hyper_parameters"]["model_kwargs"].copy()
-            
+
             # Use checkpoint's model_kwargs to ensure feature_size matches
             # But allow overriding context_length, prediction_length, and rope_scaling
             model_kwargs = {
@@ -391,7 +391,7 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
                 "use_covariates": self.use_covariates,
                 "dropout": self.dropout,
             }
-        
+
         if self.ckpt_path is not None:
             return LagLlamaLightningModule.load_from_checkpoint(
                 checkpoint_path=self.ckpt_path,
@@ -516,18 +516,19 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
             start_field=FieldName.START,
             forecast_start_field=FieldName.FORECAST_START,
             instance_sampler=instance_sampler,
-            past_length=self.context_length + (self.max_lag_original if hasattr(self, 'max_lag_original') else (max(self.lags_seq) + 1 if len(self.lags_seq) > 0 else 0)),
+            past_length=self.context_length + (self.max_lag_original if hasattr(self, 'max_lag_original') else (
+                max(self.lags_seq) + 1 if len(self.lags_seq) > 0 else 0)),
             future_length=self.prediction_length,
             time_series_fields=self._get_time_series_fields(),
             dummy_value=self.distr_output.value_in_support,
         )
 
     def create_training_data_loader(
-        self,
-        data: Dataset,
-        module: LagLlamaLightningModule,
-        shuffle_buffer_length: Optional[int] = None,
-        **kwargs,
+            self,
+            data: Dataset,
+            module: LagLlamaLightningModule,
+            shuffle_buffer_length: Optional[int] = None,
+            **kwargs,
     ) -> Iterable:
         data = Cyclic(data).stream()
         instances = self._create_instance_splitter(module, "training").apply(
@@ -545,10 +546,10 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         )
 
     def create_validation_data_loader(
-        self,
-        data: Dataset,
-        module: LagLlamaLightningModule,
-        **kwargs,
+            self,
+            data: Dataset,
+            module: LagLlamaLightningModule,
+            **kwargs,
     ) -> Iterable:
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
@@ -563,9 +564,9 @@ class LagLlamaEstimator(PyTorchLightningEstimator):
         )
 
     def create_predictor(
-        self,
-        transformation: Transformation,
-        module,
+            self,
+            transformation: Transformation,
+            module,
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
         # 推理阶段的输入名必须和前面 dataloader 输出一致，否则 Predictor 无法取值
